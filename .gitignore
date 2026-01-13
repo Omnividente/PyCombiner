@@ -21,6 +21,7 @@ pycombiner.json
 *.log
 *.tmp
 *.bak
+assets/tmp_config.json
 
 # OS / IDE
 .vscode/

@@ -193,6 +193,171 @@ class Theme:
     Dark = "dark"
 
 
+class Lang:
+    System = "system"
+    RU = "ru"
+    EN = "en"
+
+
+def get_system_lang() -> str:
+    try:
+        loc = locale.getdefaultlocale()[0] or ""
+    except Exception:
+        loc = ""
+    return Lang.RU if loc.lower().startswith("ru") else Lang.EN
+
+
+def resolve_lang(lang: str) -> str:
+    if not lang or lang == Lang.System:
+        return get_system_lang()
+    return lang if lang in (Lang.RU, Lang.EN) else Lang.EN
+
+
+STRINGS = {
+    Lang.RU: {
+        "menu_file": "Файл",
+        "menu_settings": "Настройки",
+        "menu_appearance": "Оформление",
+        "menu_language": "Язык",
+        "menu_help": "Справка",
+        "act_exit": "Выход",
+        "act_autostart": "Автозапуск PyCombiner при входе в Windows",
+        "act_theme_system": "Системная тема",
+        "act_theme_light": "Светлая",
+        "act_theme_dark": "Тёмная",
+        "act_use_mica": "Фон Mica (Windows 11)",
+        "act_about": "О программе",
+        "lang_system": "Системный",
+        "lang_ru": "Русский",
+        "lang_en": "English",
+        "btn_add": "Добавить",
+        "btn_edit": "Изменить",
+        "btn_del": "Удалить",
+        "btn_start": "Старт",
+        "btn_stop": "Стоп",
+        "btn_start_enabled": "Старт (включённые)",
+        "btn_stop_all": "Стоп все",
+        "header_enabled": "Вкл.",
+        "header_name": "Имя",
+        "header_status": "Статус",
+        "header_cmd": "Команда",
+        "header_cwd": "Рабочая папка",
+        "tab_clear": "Очистить лог",
+        "tab_clear_tip": "Очистить лог текущей вкладки",
+        "msg_stop_running": "Сначала остановите запущенный проект.",
+        "msg_no_enabled": "Нет включённых проектов для запуска.",
+        "msg_no_cmd": "Не указана команда запуска.",
+        "log_start": "Запущен: {cmd}",
+        "log_stop": "Остановка…",
+        "log_finish": "Завершён (code={code}, status={status}).",
+        "log_start_error": "[!] Ошибка запуска: {err}",
+        "log_proc_error": "[!] Ошибка процесса: {err}",
+        "about_text": "{app}\nКомбайн процессов с Fluent-оформлением.\nКонфиг: {config}\nЛоги: {logs}",
+        "tray_show": "Показать окно",
+        "tray_start_enabled": "Старт включённых",
+        "tray_exit": "Выход",
+        "tray_minimized": "Свернуто в трей",
+        "dlg_title": "Проект",
+        "dlg_label_cmd": "Команда (.py|.ps1|.bat|.exe):",
+        "dlg_label_cwd": "Рабочая папка:",
+        "dlg_label_args": "Параметры запуска:",
+        "dlg_label_name": "Имя:",
+        "dlg_placeholder_args": "например: --env prod --threads 4",
+        "dlg_browse": "Обзор",
+        "dlg_pick_cmd": "Выберите файл",
+        "dlg_pick_cwd": "Выберите папку",
+        "dlg_filter_cmd": "Скрипты/исполняемые (*.ps1 *.bat *.cmd *.exe *.py);;Все файлы (*.*)",
+        "dlg_chk_enabled": "Включать при старте",
+        "dlg_chk_autorst": "Авто‑перезапуск при падении",
+        "dlg_default_name": "Проект",
+    },
+    Lang.EN: {
+        "menu_file": "File",
+        "menu_settings": "Settings",
+        "menu_appearance": "Appearance",
+        "menu_language": "Language",
+        "menu_help": "Help",
+        "act_exit": "Exit",
+        "act_autostart": "Start PyCombiner on Windows login",
+        "act_theme_system": "System theme",
+        "act_theme_light": "Light",
+        "act_theme_dark": "Dark",
+        "act_use_mica": "Mica background (Windows 11)",
+        "act_about": "About",
+        "lang_system": "System",
+        "lang_ru": "Russian",
+        "lang_en": "English",
+        "btn_add": "Add",
+        "btn_edit": "Edit",
+        "btn_del": "Delete",
+        "btn_start": "Start",
+        "btn_stop": "Stop",
+        "btn_start_enabled": "Start (enabled)",
+        "btn_stop_all": "Stop all",
+        "header_enabled": "On",
+        "header_name": "Name",
+        "header_status": "Status",
+        "header_cmd": "Command",
+        "header_cwd": "Working dir",
+        "tab_clear": "Clear log",
+        "tab_clear_tip": "Clear current tab log",
+        "msg_stop_running": "Stop the running project first.",
+        "msg_no_enabled": "No enabled projects to start.",
+        "msg_no_cmd": "Launch command is empty.",
+        "log_start": "Started: {cmd}",
+        "log_stop": "Stopping…",
+        "log_finish": "Finished (code={code}, status={status}).",
+        "log_start_error": "[!] Start error: {err}",
+        "log_proc_error": "[!] Process error: {err}",
+        "about_text": "{app}\nProcess combiner with Fluent styling.\nConfig: {config}\nLogs: {logs}",
+        "tray_show": "Show window",
+        "tray_start_enabled": "Start enabled",
+        "tray_exit": "Exit",
+        "tray_minimized": "Minimized to tray",
+        "dlg_title": "Project",
+        "dlg_label_cmd": "Command (.py|.ps1|.bat|.exe):",
+        "dlg_label_cwd": "Working directory:",
+        "dlg_label_args": "Launch arguments:",
+        "dlg_label_name": "Name:",
+        "dlg_placeholder_args": "e.g. --env prod --threads 4",
+        "dlg_browse": "Browse",
+        "dlg_pick_cmd": "Select file",
+        "dlg_pick_cwd": "Select folder",
+        "dlg_filter_cmd": "Scripts/Executables (*.ps1 *.bat *.cmd *.exe *.py);;All files (*.*)",
+        "dlg_chk_enabled": "Enable on startup",
+        "dlg_chk_autorst": "Auto‑restart on crash",
+        "dlg_default_name": "Project",
+    },
+}
+
+STATUS_LABELS = {
+    Lang.RU: {
+        "running": "работает",
+        "starting": "запуск",
+        "stopped": "остановлен",
+        "crashed": "ошибка",
+    },
+    Lang.EN: {
+        "running": "running",
+        "starting": "starting",
+        "stopped": "stopped",
+        "crashed": "crashed",
+    },
+}
+
+
+def tr(lang: str, key: str, **kwargs) -> str:
+    lang = resolve_lang(lang)
+    text = STRINGS.get(lang, {}).get(key, STRINGS[Lang.EN].get(key, key))
+    return text.format(**kwargs) if kwargs else text
+
+
+def status_label(lang: str, status: str) -> str:
+    lang = resolve_lang(lang)
+    status = (status or "").strip().lower()
+    return STATUS_LABELS.get(lang, STATUS_LABELS[Lang.EN]).get(status, status)
+
+
 def theme_colors_hex(theme: str) -> dict:
     is_light = (theme == Theme.Light) or (
         theme == Theme.System and get_system_is_light())
@@ -415,6 +580,7 @@ class Config:
         self.data.setdefault("theme", Theme.System)
         self.data.setdefault("use_mica", True)
         self.data.setdefault("autostart_run", False)
+        self.data.setdefault("language", Lang.System)
 
     def save(self):
         ensure_dirs()
@@ -480,7 +646,7 @@ class LogView(QtWidgets.QPlainTextEdit):
         self.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
         self.setFont(QtGui.QFont(
             "Cascadia Mono, Consolas, JetBrains Mono, Courier New", 10))
-        # Keep logs bounded to avoid unbounded memory growth.
+        # Ограничиваем размер лога, чтобы не раздувать память.
         self.document().setMaximumBlockCount(LOG_MAX_LINES)
         self.apply_palette(theme, accent)
 
@@ -508,8 +674,8 @@ class StatusDelegate(QtWidgets.QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         opt = QtWidgets.QStyleOptionViewItem(option)
-        status_text = str(index.data() or "")
-        color = self._color_for_status(status_text)
+        status_code = index.data(Qt.ItemDataRole.UserRole) or index.data()
+        color = self._color_for_status(str(status_code or ""))
         opt.palette.setColor(QtGui.QPalette.Text, color)
         opt.palette.setColor(QtGui.QPalette.HighlightedText, color)
         opt.font.setBold(True)
@@ -579,6 +745,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._start_enabled_queue: List[Project] = []
         self._theme = self.cfg.data.get("theme", Theme.System)
         self._accent = argb_to_qcolor(get_accent_color_argb())
+        self._language = self.cfg.data.get("language", Lang.System)
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(load_app_icon())
@@ -587,6 +754,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_tray()
         self._build_ui()
         self._populate_projects()
+        self.apply_language()
         self.apply_theme()
         QtCore.QTimer.singleShot(0, self.apply_theme)
 
@@ -677,22 +845,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_menu(self):
         mb = self.menuBar()
-        m_file = mb.addMenu("Файл")
-        act_exit = m_file.addAction("Выход")
-        act_exit.triggered.connect(self._quit_from_tray)
+        self.menu_file = mb.addMenu("")
+        self.act_exit = self.menu_file.addAction("")
+        self.act_exit.triggered.connect(self._quit_from_tray)
 
-        m_set = mb.addMenu("Настройки")
-        self.act_autostart = m_set.addAction(
-            "Автозапуск PyCombiner при входе в Windows", lambda: None)
+        self.menu_settings = mb.addMenu("")
+        self.act_autostart = self.menu_settings.addAction("", lambda: None)
         self.act_autostart.setCheckable(True)
         self.act_autostart.setChecked(
             bool(self.cfg.data.get("autostart_run", False)))
         self.act_autostart.toggled.connect(self.on_toggle_autostart)
 
-        m_look = mb.addMenu("Оформление")
-        self.act_theme_system = m_look.addAction("Системная тема")
-        self.act_theme_light = m_look.addAction("Светлая")
-        self.act_theme_dark = m_look.addAction("Тёмная")
+        self.menu_appearance = mb.addMenu("")
+        self.act_theme_system = self.menu_appearance.addAction("")
+        self.act_theme_light = self.menu_appearance.addAction("")
+        self.act_theme_dark = self.menu_appearance.addAction("")
         for a in (self.act_theme_system, self.act_theme_light, self.act_theme_dark):
             a.setCheckable(True)
         self.act_theme_system.triggered.connect(
@@ -702,19 +869,46 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_theme_dark  .triggered.connect(
             lambda: self.set_theme(Theme.Dark))
 
-        m_look.addSeparator()
-        self.act_use_mica = m_look.addAction("Фон Mica (Windows 11)")
+        self.menu_appearance.addSeparator()
+        self.act_use_mica = self.menu_appearance.addAction("")
         self.act_use_mica.setCheckable(True)
         self.act_use_mica.setChecked(bool(self.cfg.data.get("use_mica", True)))
         self.act_use_mica.triggered.connect(self.apply_theme)
 
-        m_help = mb.addMenu("Справка")
-        m_help.addAction("О программе", self.on_about)
+        self.menu_language = mb.addMenu("")
+        self.act_lang_system = self.menu_language.addAction("")
+        self.act_lang_ru = self.menu_language.addAction("")
+        self.act_lang_en = self.menu_language.addAction("")
+        for a in (self.act_lang_system, self.act_lang_ru, self.act_lang_en):
+            a.setCheckable(True)
+        lang_group = QtGui.QActionGroup(self.menu_language)
+        lang_group.setExclusive(True)
+        for a in (self.act_lang_system, self.act_lang_ru, self.act_lang_en):
+            lang_group.addAction(a)
+        self.act_lang_system.triggered.connect(
+            lambda: self.set_language(Lang.System))
+        self.act_lang_ru.triggered.connect(lambda: self.set_language(Lang.RU))
+        self.act_lang_en.triggered.connect(lambda: self.set_language(Lang.EN))
+
+        self.menu_help = mb.addMenu("")
+        self.act_about = self.menu_help.addAction("", self.on_about)
 
     def set_theme(self, theme: str):
         self.cfg.data["theme"] = theme
         self.cfg.save()
         self.apply_theme()
+
+    def set_language(self, lang: str):
+        self._language = lang
+        self.cfg.data["language"] = lang
+        self.cfg.save()
+        self.apply_language()
+
+    def _lang(self) -> str:
+        return resolve_lang(self._language)
+
+    def _tr(self, key: str, **kwargs) -> str:
+        return tr(self._language, key, **kwargs)
 
     def apply_theme(self):
         # type: ignore[assignment]
@@ -751,6 +945,71 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_theme_dark  .setChecked(theme == Theme.Dark)
         self.act_use_mica.setChecked(bool(self.cfg.data.get("use_mica", True)))
 
+    def apply_language(self):
+        # Кнопки
+        self.btn_add.setText(self._tr("btn_add"))
+        self.btn_edit.setText(self._tr("btn_edit"))
+        self.btn_del.setText(self._tr("btn_del"))
+        self.btn_start.setText(self._tr("btn_start"))
+        self.btn_stop.setText(self._tr("btn_stop"))
+        self.btn_start_enabled.setText(self._tr("btn_start_enabled"))
+        self.btn_stop_all.setText(self._tr("btn_stop_all"))
+
+        # Заголовки таблицы
+        self.tree.setHeaderLabels([
+            self._tr("header_enabled"),
+            self._tr("header_name"),
+            self._tr("header_status"),
+            self._tr("header_cmd"),
+            self._tr("header_cwd"),
+        ])
+
+        # Вкладки логов
+        self.btn_clear_log.setText(self._tr("tab_clear"))
+        self.btn_clear_log.setToolTip(self._tr("tab_clear_tip"))
+
+        # Меню
+        self.menu_file.setTitle(self._tr("menu_file"))
+        self.menu_settings.setTitle(self._tr("menu_settings"))
+        self.menu_appearance.setTitle(self._tr("menu_appearance"))
+        self.menu_language.setTitle(self._tr("menu_language"))
+        self.menu_help.setTitle(self._tr("menu_help"))
+
+        self.act_exit.setText(self._tr("act_exit"))
+        self.act_autostart.setText(self._tr("act_autostart"))
+        self.act_theme_system.setText(self._tr("act_theme_system"))
+        self.act_theme_light.setText(self._tr("act_theme_light"))
+        self.act_theme_dark.setText(self._tr("act_theme_dark"))
+        self.act_use_mica.setText(self._tr("act_use_mica"))
+        self.act_about.setText(self._tr("act_about"))
+        self.act_lang_system.setText(self._tr("lang_system"))
+        self.act_lang_ru.setText(self._tr("lang_ru"))
+        self.act_lang_en.setText(self._tr("lang_en"))
+
+        self.act_lang_system.setChecked(self._language == Lang.System)
+        self.act_lang_ru.setChecked(self._language == Lang.RU)
+        self.act_lang_en.setChecked(self._language == Lang.EN)
+
+        # Трей
+        if getattr(self, "tray", None):
+            if getattr(self, "act_tray_show", None):
+                self.act_tray_show.setText(self._tr("tray_show"))
+            if getattr(self, "act_tray_start_enabled", None):
+                self.act_tray_start_enabled.setText(
+                    self._tr("tray_start_enabled"))
+            if getattr(self, "act_tray_exit", None):
+                self.act_tray_exit.setText(self._tr("tray_exit"))
+
+        # Обновим подписи статусов
+        for p in self.projects:
+            if p.item:
+                p.item.setText(2, self._status_label(p.status))
+                p.item.setData(2, Qt.ItemDataRole.UserRole, p.status)
+        self.tree.viewport().update()
+
+    def _status_label(self, status: str) -> str:
+        return status_label(self._language, status)
+
     def _status_color(self, status: str) -> QtGui.QColor:
         status = (status or "").strip().lower()
         theme = self._theme
@@ -784,7 +1043,8 @@ class MainWindow(QtWidgets.QMainWindow):
             item = QtWidgets.QTreeWidgetItem()
             item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             item.setText(1, p.name)
-            item.setText(2, p.status)
+            item.setText(2, self._status_label(p.status))
+            item.setData(2, Qt.ItemDataRole.UserRole, p.status)
             item.setText(3, p.cmd)
             item.setText(4, p.cwd)
             item.setData(0, Qt.ItemDataRole.UserRole, p.pid)
@@ -823,7 +1083,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_row_status(self, p: Project):
         if p.item:
-            p.item.setText(2, p.status)
+            p.item.setText(2, self._status_label(p.status))
+            p.item.setData(2, Qt.ItemDataRole.UserRole, p.status)
             self._apply_status_style(p)
             self.tree.viewport().update()
         if p.log:
@@ -833,7 +1094,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- кнопки ----------
     def on_add(self):
-        dlg = ProjectDialog(self)
+        dlg = ProjectDialog(self, lang=self._language)
         if dlg.exec() == QtWidgets.QDialog.Accepted:
             d = dlg.get_data()
             p = Project(pid=uuid.uuid4().hex, **d)
@@ -846,7 +1107,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not p:
             return
         init = p.to_dict()
-        dlg = ProjectDialog(self, init=init)
+        dlg = ProjectDialog(self, init=init, lang=self._language)
         if dlg.exec() == QtWidgets.QDialog.Accepted:
             d = dlg.get_data()
             p.name = d["name"]
@@ -875,7 +1136,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if p.process and p.process.state() == QtCore.QProcess.Running:
             QtWidgets.QMessageBox.warning(
-                self, APP_NAME, "Сначала остановите запущенный проект.")
+                self, APP_NAME, self._tr("msg_stop_running"))
             return
         self.projects = [x for x in self.projects if x.pid != p.pid]
         self.cfg.set_projects(self.projects)
@@ -896,7 +1157,7 @@ class MainWindow(QtWidgets.QMainWindow):
             p.process and p.process.state() == QtCore.QProcess.Running)]
         if not targets:
             QtWidgets.QMessageBox.information(
-                self, APP_NAME, "Нет включённых проектов.")
+                self, APP_NAME, self._tr("msg_no_enabled"))
             return
         self._start_enabled_queue = targets[:]
         self._start_enabled_next()
@@ -928,10 +1189,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ---------- about ----------
     def on_about(self):
-        text = f"""{APP_NAME}
-Комбайн процессов с Fluent-оформлением.
-Конфиг: {CONFIG_PATH}
-Логи: {LOGS_DIR}"""
+        text = self._tr(
+            "about_text",
+            app=APP_NAME,
+            config=CONFIG_PATH,
+            logs=LOGS_DIR,
+        )
         QtWidgets.QMessageBox.information(self, APP_NAME, text)
 
     # ---------- запуск/стоп процессов ----------
@@ -966,7 +1229,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # 2) если не frozen — можно использовать текущий интерпретатор
             if not getattr(sys, "frozen", False):
                 return sys.executable, ["-u", str(path)]
-            # 3) fallback: системный python
+            # 3) запасной вариант: системный python
             if os.name == "nt":
                 return "py", ["-3", "-u", str(path)]
             return "python3", ["-u", str(path)]
@@ -978,7 +1241,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not p.cmd:
             QtWidgets.QMessageBox.warning(
-                self, APP_NAME, "Команда не указана.")
+                self, APP_NAME, self._tr("msg_no_cmd"))
             return
 
         # санитарная очистка зомби перед запуском (бережно)
@@ -996,7 +1259,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not conflict_running:
             _win_kill_project_zombies(p.cmd, p.cwd, exclude)
         program, args = self._program_and_args_for_cmd(p.cmd)
-        # append user launch parameters
+        # Добавим пользовательские параметры запуска
         extra = (p.args or '').strip()
         if extra:
             try:
@@ -1036,7 +1299,7 @@ class MainWindow(QtWidgets.QMainWindow):
             proc.start()
         except Exception as e:
             if p.log:
-                p.log.append_text(f"[!] Ошибка запуска: {e}\n")
+                p.log.append_text(self._tr("log_start_error", err=e) + "\n")
             p.status = "stopped"
             self._update_row_status(p)
             return
@@ -1044,7 +1307,8 @@ class MainWindow(QtWidgets.QMainWindow):
         p.process = proc
         if p.log:
             p.log.append_text(
-                f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] Запущен: {p.cmd}\n")
+                f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] "
+                f"{self._tr('log_start', cmd=p.cmd)}\n")
 
     def _on_proc_started(self, p: Project):
         p.status = "running"
@@ -1070,7 +1334,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_row_status(p)
         if p.log:
             p.log.append_text(
-                f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] Остановка…\n"
+                f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] "
+                f"{self._tr('log_stop')}\n"
             )
 
     def _on_proc_output(self, p: Project, pr: QtCore.QProcess):
@@ -1083,7 +1348,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if p.log:
             p.log.append_text(
                 f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] "
-                f"Завершён (code={code}, status={'CrashExit' if status==QtCore.QProcess.CrashExit else 'NormalExit'}).\n"
+                f"{self._tr('log_finish', code=code, status=('CrashExit' if status==QtCore.QProcess.CrashExit else 'NormalExit'))}\n"
             )
         was_stopping = p.stopping
         p.status = "stopped" if (was_stopping or (status == QtCore.QProcess.NormalExit and code == 0)) else "crashed"
@@ -1100,7 +1365,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_proc_error(self, p: Project, err: QtCore.QProcess.ProcessError):
         if p.log:
-            p.log.append_text(f"[!] Ошибка процесса: {err}\n")
+            p.log.append_text(self._tr("log_proc_error", err=err) + "\n")
 
     def _on_selection_changed(self):
         it = self.tree.currentItem()
@@ -1151,15 +1416,15 @@ class MainWindow(QtWidgets.QMainWindow):
         icon = self.windowIcon() or load_app_icon()
         self.tray.setIcon(icon)
         menu = QtWidgets.QMenu()
-        act_show = menu.addAction("Открыть окно")
-        act_show.triggered.connect(
+        self.act_tray_show = menu.addAction("")
+        self.act_tray_show.triggered.connect(
             lambda: (self.showNormal(), self.raise_(), self.activateWindow()))
         menu.addSeparator()
-        act_start_enabled = menu.addAction("Стартовать включённые")
-        act_start_enabled.triggered.connect(self.on_start_enabled)
+        self.act_tray_start_enabled = menu.addAction("")
+        self.act_tray_start_enabled.triggered.connect(self.on_start_enabled)
         menu.addSeparator()
-        act_exit = menu.addAction("Выход")
-        act_exit.triggered.connect(self._quit_from_tray)
+        self.act_tray_exit = menu.addAction("")
+        self.act_tray_exit.triggered.connect(self._quit_from_tray)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
@@ -1181,7 +1446,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtCore.QTimer.singleShot(0, self.hide)
                 try:
                     self.tray.showMessage(
-                        APP_NAME, "Свернуто в трей", QtWidgets.QSystemTrayIcon.Information, 1200)
+                        APP_NAME, self._tr("tray_minimized"), QtWidgets.QSystemTrayIcon.Information, 1200)
                 except Exception:
                     pass
         super().changeEvent(event)
@@ -1190,9 +1455,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 class ProjectDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, init: Optional[dict] = None):
+    def __init__(self, parent=None, init: Optional[dict] = None, lang: str = Lang.System):
         super().__init__(parent)
-        self.setWindowTitle("Проект")
+        self._lang = resolve_lang(lang)
+        self._tr = lambda key, **kwargs: tr(self._lang, key, **kwargs)
+        self.setWindowTitle(self._tr("dlg_title"))
         self.setModal(True)
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(12, 12, 12, 12)
@@ -1206,30 +1473,29 @@ class ProjectDialog(QtWidgets.QDialog):
         self.ed_cmd = QtWidgets.QLineEdit()
         self.ed_cwd = QtWidgets.QLineEdit()
         self.ed_args = QtWidgets.QLineEdit()
-        self.ed_args.setPlaceholderText("например: --env prod --threads 4")
+        self.ed_args.setPlaceholderText(self._tr("dlg_placeholder_args"))
 
         # авто-подстановка CWD/Имени из выбранного файла
         self.ed_cmd.editingFinished.connect(self._autofill_from_cmd)
 
-        btn_cmd = QtWidgets.QPushButton("Обзор…")
-        btn_cwd = QtWidgets.QPushButton("Обзор…")
+        btn_cmd = QtWidgets.QPushButton(self._tr("dlg_browse"))
+        btn_cwd = QtWidgets.QPushButton(self._tr("dlg_browse"))
 
         row = QtWidgets.QHBoxLayout()
         row.addWidget(self.ed_cmd, 1)
         row.addWidget(btn_cmd)
-        form.addRow("Команда (.py|.ps1|.bat|.exe):", row)
+        form.addRow(self._tr("dlg_label_cmd"), row)
 
         row2 = QtWidgets.QHBoxLayout()
         row2.addWidget(self.ed_cwd, 1)
         row2.addWidget(btn_cwd)
-        form.addRow("Рабочая папка:", row2)
-        form.addRow("Параметры запуска:", self.ed_args)
+        form.addRow(self._tr("dlg_label_cwd"), row2)
+        form.addRow(self._tr("dlg_label_args"), self.ed_args)
 
-        form.addRow("Имя:", self.ed_name)
+        form.addRow(self._tr("dlg_label_name"), self.ed_name)
 
-        self.chk_enabled = QtWidgets.QCheckBox("Включён по умолчанию")
-        self.chk_autorst = QtWidgets.QCheckBox(
-            "Авто-рестарт при падении/завершении")
+        self.chk_enabled = QtWidgets.QCheckBox(self._tr("dlg_chk_enabled"))
+        self.chk_autorst = QtWidgets.QCheckBox(self._tr("dlg_chk_autorst"))
         self.chk_autorst.setChecked(True)
         lay.addWidget(self.chk_enabled)
         lay.addWidget(self.chk_autorst)
@@ -1268,8 +1534,8 @@ class ProjectDialog(QtWidgets.QDialog):
 
     def _pick_cmd(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Выберите файл", "",
-            "Скрипты/Приложения (*.ps1 *.bat *.cmd *.exe *.py);;Все файлы (*.*)"
+            self, self._tr("dlg_pick_cmd"), "",
+            self._tr("dlg_filter_cmd")
         )
         if path:
             self.ed_cmd.setText(path)
@@ -1277,13 +1543,13 @@ class ProjectDialog(QtWidgets.QDialog):
 
     def _pick_cwd(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Выберите папку", "")
+            self, self._tr("dlg_pick_cwd"), "")
         if d:
             self.ed_cwd.setText(d)
 
     def get_data(self) -> dict:
         return {
-            "name": self.ed_name.text().strip() or "Project",
+            "name": self.ed_name.text().strip() or self._tr("dlg_default_name"),
             "cmd": self.ed_cmd.text().strip(),
             "cwd": self.ed_cwd.text().strip(),
             "args": self.ed_args.text().strip(),

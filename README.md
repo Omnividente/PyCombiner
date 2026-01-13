@@ -6,10 +6,13 @@ PyCombiner — это компактный Windows‑GUI для запуска �
 
 Интерфейс построен на PySide6 и поддерживает светлую/тёмную тему, Mica на Windows 11 и цветовую индикацию статуса. Логи отображаются в отдельных вкладках, а объём логов ограничен, чтобы UI не разрастался со временем.
 
+![Скриншот приложения](assets/screenshot.png)
+
 ### Возможности
 - Запуск/остановка проектов и «пакетный» старт включённых.
 - Цветовая индикация статусов (running/starting/stopped/crashed).
 - Вкладки логов с кнопкой «Очистить лог».
+- Переключение языка интерфейса (RU/EN).
 - Автозапуск приложения при входе в Windows (HKCU\Run).
 - Корректное завершение дерева процессов.
 
@@ -36,14 +39,14 @@ pip install PySide6
 
 ### Запуск
 ```bash
-python combiner_with_args_autofix.py
+python pycombiner.py
 ```
 
 ### Сборка EXE
 ```bash
 pyinstaller --noconfirm --clean --onefile --windowed --name PyCombiner ^
   --collect-all PySide6 --hidden-import shiboken6 ^
-  --icon pycombiner.ico combiner_with_args_autofix.py
+  --icon pycombiner.ico pycombiner.py
 ```
 
 ### Типовые ошибки и решения
@@ -56,12 +59,13 @@ pyinstaller --noconfirm --clean --onefile --windowed --name PyCombiner ^
 Не коммитьте личные настройки и секреты. Локальные файлы (build/dist, .env, кэш и т.д.) исключены через `.gitignore`.
 
 ### Структура проекта
-- `combiner_with_args_autofix.py` — основной файл приложения (GUI, логика запуска).
+- `pycombiner.py` — основной файл приложения (GUI, логика запуска).
 - `pycombiner.ico` — иконка приложения/EXE.
 - `PyCombiner.spec` — опциональный spec для PyInstaller.
 
 ### Лицензия и авторство
-Лицензия ещё не выбрана. Авторство будет добавлено позже.
+Проект распространяется под лицензией MIT — можно свободно использовать в личных и коммерческих целях при сохранении уведомления об авторских правах и текста лицензии. См. файл LICENSE.  
+Разработчик: Omnividente (Telegram: @Omnividente).
 
 ---
 
@@ -71,10 +75,13 @@ PyCombiner is a lightweight Windows GUI to launch and monitor your projects/scri
 
 The UI is built with PySide6 and supports light/dark themes, Mica on Windows 11, and color‑coded status labels. Logs are shown in separate tabs with a line limit to avoid unbounded growth.
 
+![App screenshot](assets/screenshot.png)
+
 ### Features
 - Start/stop projects and batch‑start enabled ones.
 - Color‑coded statuses (running/starting/stopped/crashed).
 - Log tabs with “Clear log” button.
+- UI language switch (RU/EN).
 - App autostart on Windows login (HKCU\Run).
 - Proper process‑tree termination.
 
@@ -101,14 +108,14 @@ Logs are stored in:
 
 ### Run
 ```bash
-python combiner_with_args_autofix.py
+python pycombiner.py
 ```
 
 ### Build EXE
 ```bash
 pyinstaller --noconfirm --clean --onefile --windowed --name PyCombiner ^
   --collect-all PySide6 --hidden-import shiboken6 ^
-  --icon pycombiner.ico combiner_with_args_autofix.py
+  --icon pycombiner.ico pycombiner.py
 ```
 
 ### Common issues
@@ -121,9 +128,10 @@ pyinstaller --noconfirm --clean --onefile --windowed --name PyCombiner ^
 Do not commit secrets or personal settings. Local artifacts (build/dist, .env, caches, etc.) are excluded via `.gitignore`.
 
 ### Project structure
-- `combiner_with_args_autofix.py` — main app file (UI + process logic).
+- `pycombiner.py` — main app file (UI + process logic).
 - `pycombiner.ico` — app/EXE icon.
 - `PyCombiner.spec` — optional PyInstaller spec.
 
 ### License and authorship
-License not selected yet; authorship section will be added later.
+This project is released under the MIT License — you may use it for personal and commercial purposes as long as the copyright notice and license text are kept. See the LICENSE file.  
+Developer: Omnividente (Telegram: @Omnividente).
