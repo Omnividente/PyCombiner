@@ -20,7 +20,16 @@ PyCombiner — это компактный Windows‑GUI для запуска �
 - Windows 10/11
 - Python 3.10+ (для запуска из исходников)
 
-### Установка
+### Установка из GitHub
+```bash
+git clone https://github.com/Omnividente/PyCombiner.git
+cd PyCombiner
+python -m venv .venv
+.venv\Scripts\activate
+pip install PySide6
+```
+
+### Установка (если исходники уже скачаны)
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
@@ -89,7 +98,16 @@ The UI is built with PySide6 and supports light/dark themes, Mica on Windows 11,
 - Windows 10/11
 - Python 3.10+ (for running from source)
 
-### Installation
+### Install from GitHub
+```bash
+git clone https://github.com/Omnividente/PyCombiner.git
+cd PyCombiner
+python -m venv .venv
+.venv\Scripts\activate
+pip install PySide6
+```
+
+### Installation (if you already have the sources)
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
