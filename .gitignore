@@ -22,6 +22,7 @@ pycombiner.json
 *.tmp
 *.bak
 assets/tmp_config.json
+assets/*.png
 
 # OS / IDE
 .vscode/
