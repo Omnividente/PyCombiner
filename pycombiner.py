@@ -42,7 +42,9 @@ def _strip_ansi(text: str) -> str:
 
 # ------------------------ Константы/пути -----------------------------------
 APP_NAME = "PyCombiner"
+APP_VERSION = "1.1"
 ORG_NAME = "PyCombiner"
+AUTOSTART_TASK_NAME = "PyCombiner Startup"
 
 APPDATA_DIR = Path(os.environ.get("APPDATA", str(
     Path.home() / "AppData" / "Roaming"))) / "PyCombiner"
@@ -222,6 +224,7 @@ STRINGS = {
         "menu_help": "Справка",
         "act_exit": "Выход",
         "act_autostart": "Автозапуск PyCombiner при входе в Windows",
+        "act_autostart_task": "Автозапуск PyCombiner при старте Windows (без входа)",
         "act_theme_system": "Системная тема",
         "act_theme_light": "Светлая",
         "act_theme_dark": "Тёмная",
@@ -235,6 +238,7 @@ STRINGS = {
         "btn_del": "Удалить",
         "btn_start": "Старт",
         "btn_stop": "Стоп",
+        "btn_restart": "Перезапуск",
         "btn_start_enabled": "Старт (включённые)",
         "btn_stop_all": "Стоп все",
         "header_enabled": "Вкл.",
@@ -269,7 +273,17 @@ STRINGS = {
         "dlg_filter_cmd": "Скрипты/исполняемые (*.ps1 *.bat *.cmd *.exe *.py);;Все файлы (*.*)",
         "dlg_chk_enabled": "Включать при старте",
         "dlg_chk_autorst": "Авто‑перезапуск при падении",
+        "dlg_app_autostart_group": "Автозапуск приложения",
+        "dlg_app_autostart_run": "Запускать PyCombiner при входе в Windows",
+        "dlg_app_autostart_task": "Запускать PyCombiner при старте Windows (без входа)",
+        "dlg_app_autostart_task_tip": "Потребуется пароль Windows. Пароль в приложении не хранится.",
         "dlg_default_name": "Проект",
+        "msg_task_user_missing": "Не удалось определить пользователя Windows.",
+        "msg_task_password_title": "Пароль Windows",
+        "msg_task_password_label": "Введите пароль для пользователя {user}. Он нужен, чтобы запускать PyCombiner при старте системы без входа.",
+        "msg_task_password_empty": "Пароль не введён — автозапуск при старте Windows не включён.",
+        "msg_task_enable_failed": "Не удалось создать задачу автозапуска.\n{err}",
+        "msg_task_disable_failed": "Не удалось удалить задачу автозапуска.\n{err}",
     },
     Lang.EN: {
         "menu_file": "File",
@@ -279,6 +293,7 @@ STRINGS = {
         "menu_help": "Help",
         "act_exit": "Exit",
         "act_autostart": "Start PyCombiner on Windows login",
+        "act_autostart_task": "Start PyCombiner at Windows startup (no login)",
         "act_theme_system": "System theme",
         "act_theme_light": "Light",
         "act_theme_dark": "Dark",
@@ -292,6 +307,7 @@ STRINGS = {
         "btn_del": "Delete",
         "btn_start": "Start",
         "btn_stop": "Stop",
+        "btn_restart": "Restart",
         "btn_start_enabled": "Start (enabled)",
         "btn_stop_all": "Stop all",
         "header_enabled": "On",
@@ -326,7 +342,17 @@ STRINGS = {
         "dlg_filter_cmd": "Scripts/Executables (*.ps1 *.bat *.cmd *.exe *.py);;All files (*.*)",
         "dlg_chk_enabled": "Enable on startup",
         "dlg_chk_autorst": "Auto‑restart on crash",
+        "dlg_app_autostart_group": "App autostart",
+        "dlg_app_autostart_run": "Start PyCombiner on Windows login",
+        "dlg_app_autostart_task": "Start PyCombiner at Windows startup (no login)",
+        "dlg_app_autostart_task_tip": "Windows password is required. The password is not stored in the app.",
         "dlg_default_name": "Project",
+        "msg_task_user_missing": "Unable to determine the Windows user.",
+        "msg_task_password_title": "Windows password",
+        "msg_task_password_label": "Enter the password for user {user}. It is required to run PyCombiner at system startup without login.",
+        "msg_task_password_empty": "Password not provided — startup task was not enabled.",
+        "msg_task_enable_failed": "Failed to create the startup task.\n{err}",
+        "msg_task_disable_failed": "Failed to remove the startup task.\n{err}",
     },
 }
 
@@ -580,6 +606,7 @@ class Config:
         self.data.setdefault("theme", Theme.System)
         self.data.setdefault("use_mica", True)
         self.data.setdefault("autostart_run", False)
+        self.data.setdefault("autostart_task", False)
         self.data.setdefault("language", Lang.System)
 
     def save(self):
@@ -706,6 +733,54 @@ def set_windows_run_autostart(enable: bool) -> None:
         traceback.print_exc()
 
 
+def get_windows_username() -> str:
+    user = os.environ.get("USERNAME", "") or ""
+    domain = os.environ.get("USERDOMAIN", "") or os.environ.get("COMPUTERNAME", "") or ""
+    if domain and user and "\\" not in user:
+        return f"{domain}\\{user}"
+    return user
+
+
+def set_windows_task_autostart(enable: bool, username: Optional[str] = None, password: Optional[str] = None) -> Tuple[bool, str]:
+    try:
+        if enable:
+            if not username or password is None:
+                return False, "Missing credentials"
+            cmd = get_self_executable_for_run()
+            args = [
+                "schtasks",
+                "/Create",
+                "/F",
+                "/TN",
+                AUTOSTART_TASK_NAME,
+                "/SC",
+                "ONSTART",
+                "/RL",
+                "HIGHEST",
+                "/RU",
+                username,
+                "/RP",
+                password,
+                "/TR",
+                cmd,
+            ]
+        else:
+            check = subprocess.run(
+                ["schtasks", "/Query", "/TN", AUTOSTART_TASK_NAME],
+                capture_output=True,
+                text=True,
+            )
+            if check.returncode != 0:
+                return True, ""
+            args = ["schtasks", "/Delete", "/TN", AUTOSTART_TASK_NAME, "/F"]
+        res = subprocess.run(args, capture_output=True, text=True)
+        ok = (res.returncode == 0)
+        msg = (res.stdout or "") + ("\n" + res.stderr if res.stderr else "")
+        return ok, msg.strip()
+    except Exception as e:
+        return False, str(e)
+
+
 def get_self_executable_for_run() -> str:
     """
     Возвращает команду для автозапуска PyCombiner с флагом --autostart,
@@ -746,8 +821,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._theme = self.cfg.data.get("theme", Theme.System)
         self._accent = argb_to_qcolor(get_accent_color_argb())
         self._language = self.cfg.data.get("language", Lang.System)
+        self._syncing_selection = False
+        self._syncing_autostart_task = False
 
-        self.setWindowTitle(APP_NAME)
+        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.setWindowIcon(load_app_icon())
 
         self._really_quit = False
@@ -784,9 +861,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_del = QtWidgets.QPushButton("Удалить")
         self.btn_start = QtWidgets.QPushButton("Старт")
         self.btn_stop = QtWidgets.QPushButton("Стоп")
+        self.btn_restart = QtWidgets.QPushButton("Перезапуск")
         self.btn_start_enabled = QtWidgets.QPushButton("Старт (включённые)")
         self.btn_stop_all = QtWidgets.QPushButton("Стоп все")
-        for b in (self.btn_add, self.btn_edit, self.btn_del, self.btn_start, self.btn_stop, self.btn_start_enabled, self.btn_stop_all):
+        for b in (self.btn_add, self.btn_edit, self.btn_del, self.btn_start, self.btn_stop, self.btn_restart, self.btn_start_enabled, self.btn_stop_all):
             btns.addWidget(b)
         btns.addStretch(1)
 
@@ -838,10 +916,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_del.clicked.connect(self.on_delete)
         self.btn_start.clicked.connect(self.on_start_selected)
         self.btn_stop.clicked.connect(self.on_stop_selected)
+        self.btn_restart.clicked.connect(self.on_restart_selected)
         self.btn_start_enabled.clicked.connect(self.on_start_enabled)
         self.btn_stop_all.clicked.connect(self.on_stop_all)
 
         self.tree.itemSelectionChanged.connect(self._on_selection_changed)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
     def _build_menu(self):
         mb = self.menuBar()
@@ -855,6 +935,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_autostart.setChecked(
             bool(self.cfg.data.get("autostart_run", False)))
         self.act_autostart.toggled.connect(self.on_toggle_autostart)
+        self.act_autostart_task = self.menu_settings.addAction("", lambda: None)
+        self.act_autostart_task.setCheckable(True)
+        self.act_autostart_task.setChecked(
+            bool(self.cfg.data.get("autostart_task", False)))
+        self.act_autostart_task.toggled.connect(self.on_toggle_autostart_task)
 
         self.menu_appearance = mb.addMenu("")
         self.act_theme_system = self.menu_appearance.addAction("")
@@ -938,6 +1023,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 p.switch.accent = accent
                 p.switch.update()
             self._apply_status_style(p)
+            self._apply_tab_status(p)
 
         # обновить состояние меню
         self.act_theme_system.setChecked(theme == Theme.System)
@@ -952,6 +1038,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_del.setText(self._tr("btn_del"))
         self.btn_start.setText(self._tr("btn_start"))
         self.btn_stop.setText(self._tr("btn_stop"))
+        self.btn_restart.setText(self._tr("btn_restart"))
         self.btn_start_enabled.setText(self._tr("btn_start_enabled"))
         self.btn_stop_all.setText(self._tr("btn_stop_all"))
 
@@ -977,6 +1064,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.act_exit.setText(self._tr("act_exit"))
         self.act_autostart.setText(self._tr("act_autostart"))
+        if getattr(self, "act_autostart_task", None):
+            self.act_autostart_task.setText(self._tr("act_autostart_task"))
         self.act_theme_system.setText(self._tr("act_theme_system"))
         self.act_theme_light.setText(self._tr("act_theme_light"))
         self.act_theme_dark.setText(self._tr("act_theme_dark"))
@@ -1031,6 +1120,28 @@ class MainWindow(QtWidgets.QMainWindow):
         font.setBold(True)
         p.item.setFont(2, font)
 
+    def _apply_tab_status(self, p: Project) -> None:
+        if not p.log:
+            return
+        idx = self.tabs.indexOf(p.log)
+        if idx < 0:
+            return
+        if (p.status or "").strip().lower() == "crashed":
+            self.tabs.tabBar().setTabTextColor(
+                idx, self._status_color(p.status))
+        else:
+            self.tabs.tabBar().setTabTextColor(idx, QtGui.QColor())
+
+    def _apply_app_autostart_settings(self, data: dict) -> None:
+        run_enabled = data.get("app_autostart_run")
+        task_enabled = data.get("app_autostart_task")
+        if run_enabled is not None and getattr(self, "act_autostart", None):
+            if bool(self.cfg.data.get("autostart_run", False)) != bool(run_enabled):
+                self.act_autostart.setChecked(bool(run_enabled))
+        if task_enabled is not None and getattr(self, "act_autostart_task", None):
+            if bool(self.cfg.data.get("autostart_task", False)) != bool(task_enabled):
+                self.act_autostart_task.setChecked(bool(task_enabled))
+
     # ---------- заполнение ----------
     def _populate_projects(self):
         self.tree.clear()
@@ -1062,6 +1173,7 @@ class MainWindow(QtWidgets.QMainWindow):
             te = LogView(theme=theme, accent=accent, parent=self.tabs)
             self.tabs.addTab(te, p.name)
             p.log = te
+            self._apply_tab_status(p)
 
         if self.tree.topLevelItemCount() > 0:
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
@@ -1091,12 +1203,21 @@ class MainWindow(QtWidgets.QMainWindow):
             idx = self.tabs.indexOf(p.log)
             if idx >= 0:
                 self.tabs.setTabText(idx, p.name)
+        self._apply_tab_status(p)
 
     # ---------- кнопки ----------
     def on_add(self):
-        dlg = ProjectDialog(self, lang=self._language)
+        dlg = ProjectDialog(
+            self,
+            lang=self._language,
+            autostart_run=bool(self.cfg.data.get("autostart_run", False)),
+            autostart_task=bool(self.cfg.data.get("autostart_task", False)),
+        )
         if dlg.exec() == QtWidgets.QDialog.Accepted:
             d = dlg.get_data()
+            self._apply_app_autostart_settings(d)
+            d.pop("app_autostart_run", None)
+            d.pop("app_autostart_task", None)
             p = Project(pid=uuid.uuid4().hex, **d)
             self.projects.append(p)
             self.cfg.set_projects(self.projects)
@@ -1107,9 +1228,18 @@ class MainWindow(QtWidgets.QMainWindow):
         if not p:
             return
         init = p.to_dict()
-        dlg = ProjectDialog(self, init=init, lang=self._language)
+        dlg = ProjectDialog(
+            self,
+            init=init,
+            lang=self._language,
+            autostart_run=bool(self.cfg.data.get("autostart_run", False)),
+            autostart_task=bool(self.cfg.data.get("autostart_task", False)),
+        )
         if dlg.exec() == QtWidgets.QDialog.Accepted:
             d = dlg.get_data()
+            self._apply_app_autostart_settings(d)
+            d.pop("app_autostart_run", None)
+            d.pop("app_autostart_task", None)
             p.name = d["name"]
             p.cmd = d["cmd"]
             p.cwd = d["cwd"]
@@ -1152,6 +1282,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if p:
             self.stop_project(p)
 
+    def on_restart_selected(self):
+        p = self._selected_project()
+        if not p:
+            return
+        self.stop_project(p)
+        self.start_project(p)
+
     def on_start_enabled(self):
         targets = [p for p in self.projects if p.enabled and not (
             p.process and p.process.state() == QtCore.QProcess.Running)]
@@ -1187,11 +1324,60 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cfg.save()
         set_windows_run_autostart(enabled)
 
+    def _set_autostart_task_checked(self, value: bool):
+        if getattr(self, "act_autostart_task", None) is None:
+            return
+        self._syncing_autostart_task = True
+        try:
+            self.act_autostart_task.setChecked(value)
+        finally:
+            self._syncing_autostart_task = False
+
+    def on_toggle_autostart_task(self, enabled: bool):
+        if self._syncing_autostart_task:
+            return
+        if enabled:
+            user = get_windows_username()
+            if not user:
+                QtWidgets.QMessageBox.warning(
+                    self, APP_NAME, self._tr("msg_task_user_missing"))
+                self._set_autostart_task_checked(False)
+                return
+            pwd, ok = QtWidgets.QInputDialog.getText(
+                self,
+                self._tr("msg_task_password_title"),
+                self._tr("msg_task_password_label", user=user),
+                QtWidgets.QLineEdit.Password,
+            )
+            if not ok or not pwd:
+                QtWidgets.QMessageBox.information(
+                    self, APP_NAME, self._tr("msg_task_password_empty"))
+                self._set_autostart_task_checked(False)
+                return
+            ok_task, err = set_windows_task_autostart(
+                True, username=user, password=pwd)
+            if not ok_task:
+                QtWidgets.QMessageBox.warning(
+                    self, APP_NAME, self._tr("msg_task_enable_failed", err=err))
+                self._set_autostart_task_checked(False)
+                return
+            self.cfg.data["autostart_task"] = True
+            self.cfg.save()
+        else:
+            ok_task, err = set_windows_task_autostart(False)
+            if not ok_task:
+                QtWidgets.QMessageBox.warning(
+                    self, APP_NAME, self._tr("msg_task_disable_failed", err=err))
+                self._set_autostart_task_checked(True)
+                return
+            self.cfg.data["autostart_task"] = False
+            self.cfg.save()
+
     # ---------- about ----------
     def on_about(self):
         text = self._tr(
             "about_text",
-            app=APP_NAME,
+            app=f"{APP_NAME} v{APP_VERSION}",
             config=CONFIG_PATH,
             logs=LOGS_DIR,
         )
@@ -1368,6 +1554,8 @@ class MainWindow(QtWidgets.QMainWindow):
             p.log.append_text(self._tr("log_proc_error", err=err) + "\n")
 
     def _on_selection_changed(self):
+        if self._syncing_selection:
+            return
         it = self.tree.currentItem()
         if not it:
             return
@@ -1375,8 +1563,26 @@ class MainWindow(QtWidgets.QMainWindow):
         # активировать вкладку по имени
         for idx, prj in enumerate(self.projects):
             if prj.pid == pid:
-                self.tabs.setCurrentIndex(idx)
+                self._syncing_selection = True
+                try:
+                    self.tabs.setCurrentIndex(idx)
+                finally:
+                    self._syncing_selection = False
                 break
+
+    def _on_tab_changed(self, index: int):
+        if self._syncing_selection:
+            return
+        if index < 0 or index >= len(self.projects):
+            return
+        prj = self.projects[index]
+        if not prj.item:
+            return
+        self._syncing_selection = True
+        try:
+            self.tree.setCurrentItem(prj.item)
+        finally:
+            self._syncing_selection = False
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         # Реальный выход по крестику
@@ -1455,7 +1661,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 class ProjectDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, init: Optional[dict] = None, lang: str = Lang.System):
+    def __init__(
+        self,
+        parent=None,
+        init: Optional[dict] = None,
+        lang: str = Lang.System,
+        autostart_run: Optional[bool] = None,
+        autostart_task: Optional[bool] = None,
+    ):
         super().__init__(parent)
         self._lang = resolve_lang(lang)
         self._tr = lambda key, **kwargs: tr(self._lang, key, **kwargs)
@@ -1500,6 +1713,21 @@ class ProjectDialog(QtWidgets.QDialog):
         lay.addWidget(self.chk_enabled)
         lay.addWidget(self.chk_autorst)
 
+        self.grp_autostart = QtWidgets.QGroupBox(
+            self._tr("dlg_app_autostart_group"))
+        autol = QtWidgets.QVBoxLayout(self.grp_autostart)
+        autol.setContentsMargins(10, 6, 10, 6)
+        autol.setSpacing(4)
+        self.chk_app_autostart_run = QtWidgets.QCheckBox(
+            self._tr("dlg_app_autostart_run"))
+        self.chk_app_autostart_task = QtWidgets.QCheckBox(
+            self._tr("dlg_app_autostart_task"))
+        self.chk_app_autostart_task.setToolTip(
+            self._tr("dlg_app_autostart_task_tip"))
+        autol.addWidget(self.chk_app_autostart_run)
+        autol.addWidget(self.chk_app_autostart_task)
+        lay.addWidget(self.grp_autostart)
+
         bb = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel)
         lay.addWidget(bb)
@@ -1516,6 +1744,10 @@ class ProjectDialog(QtWidgets.QDialog):
             self.ed_args.setText(init.get("args", ""))
             self.chk_enabled.setChecked(bool(init.get("enabled", False)))
             self.chk_autorst.setChecked(bool(init.get("autorestart", True)))
+        if autostart_run is not None:
+            self.chk_app_autostart_run.setChecked(bool(autostart_run))
+        if autostart_task is not None:
+            self.chk_app_autostart_task.setChecked(bool(autostart_task))
 
     def _autofill_from_cmd(self):
         path_str = self.ed_cmd.text().strip()
@@ -1555,6 +1787,8 @@ class ProjectDialog(QtWidgets.QDialog):
             "args": self.ed_args.text().strip(),
             "enabled": self.chk_enabled.isChecked(),
             "autorestart": self.chk_autorst.isChecked(),
+            "app_autostart_run": self.chk_app_autostart_run.isChecked(),
+            "app_autostart_task": self.chk_app_autostart_task.isChecked(),
         }
 
 
