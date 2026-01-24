@@ -1,4 +1,4 @@
-# PyCombiner
+﻿# PyCombiner
 
 [Russian version](README.md)
 
@@ -14,6 +14,7 @@ The UI is built with PySide6 and supports light/dark themes, Mica on Windows 11,
 - Log tabs with a "Clear log" button.
 - UI language switch (RU/EN).
 - App autostart on Windows login (HKCU\Run).
+- Autostart at Windows boot without login (Task Scheduler).
 - Proper process-tree termination.
 
 ### Requirements
@@ -50,6 +51,19 @@ Logs are stored in:
 ```bash
 python pycombiner.py
 ```
+
+### Autostart without login (Task Scheduler)
+1) In **Settings**, enable **“Start PyCombiner at Windows startup (no login)”**.  
+2) The app will ask for your Windows password (it is **not stored**).  
+3) A scheduled task is created to run PyCombiner in headless mode (`--headless --autostart`).
+
+### How GUI works when headless is running
+- Headless controls processes and writes state to:
+  - `%APPDATA%\PyCombiner\state.json`
+  - `%APPDATA%\PyCombiner\logs`
+- When you open the GUI, it connects as a client: reads `state.json`, shows logs, and sends commands via `%APPDATA%\PyCombiner\commands`.
+- This means you can log in and open the GUI to see everything that happened before login, without stopping the bots.
+- If headless is not running, the GUI works in standalone mode.
 
 ### Build EXE
 ```bash
