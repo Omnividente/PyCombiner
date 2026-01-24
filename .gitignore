@@ -11,6 +11,9 @@ ENV/
 # PyInstaller build artifacts
 /build/
 /dist/
+/build_tmp/
+/dist_new/
+*.spec
 
 # Local configs / secrets
 .env

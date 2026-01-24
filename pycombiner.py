@@ -17,6 +17,7 @@ from PySide6.QtCore import Qt
 from PySide6 import QtCore, QtGui, QtWidgets
 
 import argparse
+import faulthandler
 import json
 import locale
 import os
@@ -25,6 +26,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
@@ -42,7 +44,7 @@ def _strip_ansi(text: str) -> str:
 
 # ------------------------ Константы/пути -----------------------------------
 APP_NAME = "PyCombiner"
-APP_VERSION = "1.1"
+APP_VERSION = "1.1.1"
 ORG_NAME = "PyCombiner"
 AUTOSTART_TASK_NAME = "PyCombiner Startup"
 
@@ -50,9 +52,18 @@ APPDATA_DIR = Path(os.environ.get("APPDATA", str(
     Path.home() / "AppData" / "Roaming"))) / "PyCombiner"
 CONFIG_PATH = APPDATA_DIR / "config.json"
 LOGS_DIR = APPDATA_DIR / "logs"
+STATE_PATH = APPDATA_DIR / "state.json"
+COMMANDS_DIR = APPDATA_DIR / "commands"
+DAEMON_PID_PATH = APPDATA_DIR / "daemon.pid"
+APP_LOG_PATH = APPDATA_DIR / "app.log"
 APPDATA_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+COMMANDS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_MAX_LINES = 300
+LOG_ROTATE_MAX_BYTES = 5 * 1024 * 1024
+LOG_ROTATE_COUNT = 3
+PID_CACHE_TTL_SEC = 2.0
+_PID_CACHE: Dict[int, Tuple[float, bool]] = {}
 
 
 # ------------------------ Утилиты ------------------------------------------
@@ -60,6 +71,109 @@ LOG_MAX_LINES = 300
 def ensure_dirs():
     APPDATA_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    COMMANDS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def log_app(message: str) -> None:
+    try:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        APP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with APP_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {message}\n")
+    except Exception:
+        pass
+
+
+def install_debug_handlers() -> None:
+    try:
+        fh = APPDATA_DIR / "app_crash.log"
+        fh.parent.mkdir(parents=True, exist_ok=True)
+        with fh.open("a", encoding="utf-8") as f:
+            faulthandler.enable(file=f, all_threads=True)
+    except Exception:
+        pass
+
+    def _excepthook(exc_type, exc, tb):
+        try:
+            log_app("Unhandled exception:\n" +
+                    "".join(traceback.format_exception(exc_type, exc, tb)))
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = _excepthook
+
+    def _qt_msg_handler(mode, context, message):
+        try:
+            log_app(f"Qt[{mode}] {message}")
+        except Exception:
+            pass
+
+    try:
+        QtCore.qInstallMessageHandler(_qt_msg_handler)
+    except Exception:
+        pass
+
+
+def set_data_dir(path: str) -> None:
+    global APPDATA_DIR, CONFIG_PATH, LOGS_DIR, STATE_PATH, COMMANDS_DIR, DAEMON_PID_PATH, APP_LOG_PATH
+    if not path:
+        return
+    p = Path(path).expanduser()
+    APPDATA_DIR = p
+    CONFIG_PATH = APPDATA_DIR / "config.json"
+    LOGS_DIR = APPDATA_DIR / "logs"
+    STATE_PATH = APPDATA_DIR / "state.json"
+    COMMANDS_DIR = APPDATA_DIR / "commands"
+    DAEMON_PID_PATH = APPDATA_DIR / "daemon.pid"
+    APP_LOG_PATH = APPDATA_DIR / "app.log"
+    ensure_dirs()
+
+
+def _env_lookup(env: Optional[Dict[str, str]], key: str, default: str = "") -> str:
+    if env is None:
+        return os.environ.get(key, default)
+    if key in env and env[key] is not None:
+        return str(env[key])
+    key_lower = key.lower()
+    for k, v in env.items():
+        if k.lower() == key_lower and v is not None:
+            return str(v)
+    return default
+
+
+def _normalize_env_snapshot(raw: object) -> Dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str):
+            continue
+        if v is None:
+            continue
+        out[k] = str(v)
+    return out
+
+
+def capture_env_snapshot() -> Dict[str, str]:
+    return {str(k): str(v) for k, v in os.environ.items()}
+
+
+def maybe_update_env_snapshot(cfg: "Config") -> None:
+    current = _normalize_env_snapshot(cfg.data.get("env_snapshot"))
+    snapshot = capture_env_snapshot()
+    if snapshot != current:
+        cfg.data["env_snapshot"] = snapshot
+        cfg.save()
+
+
+def build_process_environment(snapshot: Optional[Dict[str, str]]) -> QtCore.QProcessEnvironment:
+    if snapshot:
+        env = QtCore.QProcessEnvironment()
+        for k, v in snapshot.items():
+            env.insert(k, v)
+        return env
+    return QtCore.QProcessEnvironment.systemEnvironment()
 
 
 def get_win_build() -> int:
@@ -254,6 +368,7 @@ STRINGS = {
         "log_start": "Запущен: {cmd}",
         "log_stop": "Остановка…",
         "log_finish": "Завершён (code={code}, status={status}).",
+        "log_adopted": "Уже запущен (pid={pid}), подхвачен.",
         "log_start_error": "[!] Ошибка запуска: {err}",
         "log_proc_error": "[!] Ошибка процесса: {err}",
         "about_text": "{app}\nКомбайн процессов с Fluent-оформлением.\nКонфиг: {config}\nЛоги: {logs}",
@@ -284,6 +399,8 @@ STRINGS = {
         "msg_task_password_empty": "Пароль не введён — автозапуск при старте Windows не включён.",
         "msg_task_enable_failed": "Не удалось создать задачу автозапуска.\n{err}",
         "msg_task_disable_failed": "Не удалось удалить задачу автозапуска.\n{err}",
+        "headless_connected": "Headless: подключен (pid={pid})",
+        "headless_disconnected": "Headless: не подключен",
     },
     Lang.EN: {
         "menu_file": "File",
@@ -323,6 +440,7 @@ STRINGS = {
         "log_start": "Started: {cmd}",
         "log_stop": "Stopping…",
         "log_finish": "Finished (code={code}, status={status}).",
+        "log_adopted": "Already running (pid={pid}), adopted.",
         "log_start_error": "[!] Start error: {err}",
         "log_proc_error": "[!] Process error: {err}",
         "about_text": "{app}\nProcess combiner with Fluent styling.\nConfig: {config}\nLogs: {logs}",
@@ -353,6 +471,8 @@ STRINGS = {
         "msg_task_password_empty": "Password not provided — startup task was not enabled.",
         "msg_task_enable_failed": "Failed to create the startup task.\n{err}",
         "msg_task_disable_failed": "Failed to remove the startup task.\n{err}",
+        "headless_connected": "Headless: connected (pid={pid})",
+        "headless_disconnected": "Headless: not connected",
     },
 }
 
@@ -481,14 +601,13 @@ def _win_taskkill_tree(pid: int):
         pass
 
 
-def _win_kill_project_zombies(command: str, work_dir: str, exclude_pids: Optional[set[int]] = None):
+def _win_find_project_pids(command: str, work_dir: str, exclude_pids: Optional[set[int]] = None) -> List[int]:
     """
-    Перед стартом пробуем найти и погасить зависшие процессы проекта
-    по подстрокам из командной строки/рабочей папки.
-    Делается через PowerShell и запрос CIM Win32_Process.
+    Ищем процессы проекта по подстрокам командной строки/рабочей папки.
+    Возвращаем список PID (Windows, через PowerShell/CIM).
     """
     if platform.system() != "Windows":
-        return
+        return []
 
     needles = []
     if command:
@@ -499,7 +618,7 @@ def _win_kill_project_zombies(command: str, work_dir: str, exclude_pids: Optiona
     needles = [n for n in needles if n]
 
     if not needles:
-        return
+        return []
 
     # В PowerShell оборачиваем шаблон в ОДИНАРНЫЕ кавычки: '*needle*'
     # Если внутри есть одинарная кавычка — удваиваем её.
@@ -508,6 +627,8 @@ def _win_kill_project_zombies(command: str, work_dir: str, exclude_pids: Optiona
         esc = n.replace("'", "''")
         cond_parts.append(f"($_.CommandLine -like '*{esc}*')")
     cond = " -and ".join(cond_parts)
+    # avoid matching the powershell process running this query
+    cond = f"($_.ProcessId -ne $PID) -and ({cond})"
 
     ps = (
         f"Get-CimInstance Win32_Process | Where-Object {{ {cond} }} "
@@ -526,13 +647,28 @@ def _win_kill_project_zombies(command: str, work_dir: str, exclude_pids: Optiona
     except Exception:
         out = ""
 
-    for m in re.findall(r"\d+", out or ""):
+    pids: List[int] = []
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if not line or not line.isdigit():
+            continue
         try:
-            pid = int(m)
+            pid = int(line)
         except Exception:
             continue
         if exclude_pids and pid in exclude_pids:
             continue
+        pids.append(pid)
+    return pids
+
+
+def _win_kill_project_zombies(command: str, work_dir: str, exclude_pids: Optional[set[int]] = None):
+    """
+    Перед стартом пробуем найти и погасить зависшие процессы проекта
+    по подстрокам из командной строки/рабочей папки.
+    Делается через PowerShell и запрос CIM Win32_Process.
+    """
+    for pid in _win_find_project_pids(command, work_dir, exclude_pids):
         try:
             _win_taskkill_tree(pid)
         except Exception:
@@ -563,6 +699,8 @@ class Project:
         default=None, repr=False, compare=False, init=False)
     stopping: bool = field(default=False, repr=False,
                            compare=False, init=False)
+    external_pid: Optional[int] = field(
+        default=None, repr=False, compare=False, init=False)
 
     def to_dict(self) -> dict:
         return {
@@ -608,6 +746,7 @@ class Config:
         self.data.setdefault("autostart_run", False)
         self.data.setdefault("autostart_task", False)
         self.data.setdefault("language", Lang.System)
+        self.data.setdefault("env_snapshot", {})
 
     def save(self):
         ensure_dirs()
@@ -625,6 +764,231 @@ class Config:
     def set_projects(self, projects: List[Project]) -> None:
         self.data["projects"] = [p.to_dict() for p in projects]
         self.save()
+
+
+def _safe_filename(text: str) -> str:
+    if not text:
+        return "log"
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("_") or "log"
+
+
+def log_path_for_project(p: "Project") -> Path:
+    return LOGS_DIR / f"{_safe_filename(p.pid)}.log"
+
+
+def _rotate_log_file(path: Path) -> None:
+    if LOG_ROTATE_COUNT <= 1:
+        try:
+            path.write_text("", "utf-8")
+        except Exception:
+            pass
+        return
+    backups = max(LOG_ROTATE_COUNT - 1, 0)
+    try:
+        oldest = path.with_suffix(path.suffix + f".{backups}")
+        if oldest.exists():
+            oldest.unlink()
+        for i in range(backups - 1, 0, -1):
+            src = path.with_suffix(path.suffix + f".{i}")
+            dst = path.with_suffix(path.suffix + f".{i + 1}")
+            if src.exists():
+                src.replace(dst)
+        if path.exists():
+            path.replace(path.with_suffix(path.suffix + ".1"))
+    except Exception:
+        pass
+
+
+def _clear_log_backups(path: Path) -> None:
+    backups = max(LOG_ROTATE_COUNT - 1, 0)
+    for i in range(1, backups + 1):
+        p = path.with_suffix(path.suffix + f".{i}")
+        try:
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+
+
+def append_project_log(p: "Project", text: str) -> None:
+    if not text:
+        return
+    text = _strip_ansi(text)
+    try:
+        path = log_path_for_project(p)
+        data = text.encode("utf-8", errors="replace")
+        if LOG_ROTATE_MAX_BYTES > 0:
+            try:
+                size = path.stat().st_size if path.exists() else 0
+                if size + len(data) > LOG_ROTATE_MAX_BYTES:
+                    _rotate_log_file(path)
+                    if len(data) > LOG_ROTATE_MAX_BYTES:
+                        data = data[-LOG_ROTATE_MAX_BYTES:]
+            except Exception:
+                pass
+        with path.open("ab") as f:
+            f.write(data)
+    except Exception:
+        pass
+
+
+def read_log_tail(path: Path, max_lines: int = LOG_MAX_LINES) -> str:
+    if not path.exists():
+        return ""
+    try:
+        size = path.stat().st_size
+        chunk = 256 * 1024
+        start = max(0, size - chunk)
+        with path.open("rb") as f:
+            f.seek(start)
+            data = f.read()
+        text = decode_bytes(data)
+        lines = text.splitlines()
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+        return ("\n".join(lines) + ("\n" if text.endswith("\n") else ""))
+    except Exception:
+        return ""
+
+
+def read_log_from_offset(path: Path, offset: int) -> Tuple[str, int]:
+    if not path.exists():
+        return "", 0
+    try:
+        size = path.stat().st_size
+        if size < offset:
+            offset = 0
+        with path.open("rb") as f:
+            f.seek(offset)
+            data = f.read()
+        return decode_bytes(data), size
+    except Exception:
+        return "", offset
+
+
+def write_state(projects: List[Project]) -> None:
+    try:
+        data = {
+            "updated_at": time.time(),
+            "projects": [
+                {
+                    "pid": p.pid,
+                    "name": p.name,
+                    "cmd": p.cmd,
+                    "cwd": p.cwd,
+                    "args": p.args,
+                    "enabled": p.enabled,
+                    "autorestart": p.autorestart,
+                    "status": p.status,
+                    "os_pid": (
+                        int(p.process.processId())
+                        if p.process and p.process.state() == QtCore.QProcess.Running
+                        else (int(p.external_pid) if p.external_pid else None)
+                    ),
+                }
+                for p in projects
+            ],
+        }
+        tmp = STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+        tmp.replace(STATE_PATH)
+    except Exception:
+        pass
+
+
+def read_state() -> dict:
+    if not STATE_PATH.exists():
+        return {}
+    try:
+        return json.loads(STATE_PATH.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def is_pid_running(pid: int) -> bool:
+    if not pid or pid <= 0:
+        return False
+    now = time.monotonic()
+    cached = _PID_CACHE.get(pid)
+    if cached and (now - cached[0]) < PID_CACHE_TTL_SEC:
+        return cached[1]
+    alive = False
+    if os.name == "nt":
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            out = subprocess.check_output(
+                ["tasklist", "/FO", "CSV", "/NH", "/FI", f"PID eq {pid}"],
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                creationflags=flags,
+            )
+            if "No tasks are running" in out:
+                alive = False
+            else:
+                # CSV line format: "Image Name","PID",...
+                if re.search(rf'","{pid}"', out):
+                    alive = True
+                elif re.search(rf"\\b{pid}\\b", out):
+                    alive = True
+        except Exception:
+            pass
+    if not alive:
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except PermissionError:
+            # Process exists but we may not have rights to query it.
+            alive = True
+        except OSError as e:
+            # On Windows, access denied may come as generic OSError (winerror=5).
+            if getattr(e, "winerror", None) == 5 or getattr(e, "errno", None) in (5, 13):
+                alive = True
+            else:
+                alive = False
+        except Exception:
+            alive = False
+    _PID_CACHE[pid] = (now, alive)
+    if len(_PID_CACHE) > 256:
+        # drop oldest entries
+        for k, _v in sorted(_PID_CACHE.items(), key=lambda it: it[1][0])[:64]:
+            _PID_CACHE.pop(k, None)
+    return alive
+
+
+def read_daemon_pid() -> Optional[int]:
+    if not DAEMON_PID_PATH.exists():
+        return None
+    try:
+        pid = int(DAEMON_PID_PATH.read_text("utf-8").strip())
+    except Exception:
+        try:
+            DAEMON_PID_PATH.unlink()
+        except Exception:
+            pass
+        return None
+    if not is_pid_running(pid):
+        try:
+            DAEMON_PID_PATH.unlink()
+        except Exception:
+            pass
+        return None
+    return pid
+
+
+def is_daemon_running() -> bool:
+    return read_daemon_pid() is not None
+
+
+def is_state_fresh(max_age_sec: float = 5.0) -> bool:
+    try:
+        data = read_state()
+        ts = float(data.get("updated_at") or 0.0)
+        if ts <= 0:
+            return False
+        return (time.time() - ts) <= max_age_sec
+    except Exception:
+        return False
 
 
 # ------------------------ Пользовательские виджеты -------------------------
@@ -746,23 +1110,25 @@ def set_windows_task_autostart(enable: bool, username: Optional[str] = None, pas
         if enable:
             if not username or password is None:
                 return False, "Missing credentials"
-            cmd = get_self_executable_for_run()
+            command, args_list = get_self_run_parts(
+                headless=True, data_dir=APPDATA_DIR)
+            args_str = subprocess.list2cmdline(args_list) if os.name == "nt" else " ".join(
+                shlex.quote(a) for a in args_list)
+            xml = build_task_xml(command, args_str, username)
+            xml_path = APPDATA_DIR / "autostart_task.xml"
+            xml_path.write_text(xml, encoding="utf-16")
             args = [
                 "schtasks",
                 "/Create",
                 "/F",
                 "/TN",
                 AUTOSTART_TASK_NAME,
-                "/SC",
-                "ONSTART",
-                "/RL",
-                "HIGHEST",
+                "/XML",
+                str(xml_path),
                 "/RU",
                 username,
                 "/RP",
                 password,
-                "/TR",
-                cmd,
             ]
         else:
             check = subprocess.run(
@@ -776,12 +1142,25 @@ def set_windows_task_autostart(enable: bool, username: Optional[str] = None, pas
         res = subprocess.run(args, capture_output=True, text=True)
         ok = (res.returncode == 0)
         msg = (res.stdout or "") + ("\n" + res.stderr if res.stderr else "")
+        if enable and ok:
+            try:
+                if 'xml_path' in locals() and xml_path.exists():
+                    xml_path.unlink()
+            except Exception:
+                pass
+            verify = subprocess.run(
+                ["schtasks", "/Query", "/TN", AUTOSTART_TASK_NAME],
+                capture_output=True,
+                text=True,
+            )
+            if verify.returncode != 0:
+                return False, (msg.strip() + "\nTask verification failed.").strip()
         return ok, msg.strip()
     except Exception as e:
         return False, str(e)
 
 
-def get_self_executable_for_run() -> str:
+def get_self_executable_for_run(*, headless: bool = False, data_dir: Optional[Path] = None) -> str:
     """
     Возвращает команду для автозапуска PyCombiner с флагом --autostart,
     корректно экранированную под текущую ОС.
@@ -793,6 +1172,10 @@ def get_self_executable_for_run() -> str:
         # запускаем интерпретатор + текущий скрипт
         args = [str(Path(sys.executable)), str(
             Path(sys.argv[0]).resolve()), "--autostart"]
+    if headless:
+        args.append("--headless")
+    if data_dir:
+        args += ["--data-dir", str(data_dir)]
 
     if os.name == "nt":
         # правильное quoting для командной строки Windows
@@ -802,12 +1185,523 @@ def get_self_executable_for_run() -> str:
         return " ".join(shlex.quote(a) for a in args)
 
 
-def shutil_which(name: str) -> Optional[str]:
-    for p in os.environ.get("PATH", "").split(os.pathsep):
+def get_self_run_parts(*, headless: bool = False, data_dir: Optional[Path] = None, autostart: bool = True) -> Tuple[str, List[str]]:
+    if getattr(sys, "frozen", False):
+        args = [str(Path(sys.executable))]
+    else:
+        args = [str(Path(sys.executable)), str(Path(sys.argv[0]).resolve())]
+    if headless:
+        args.append("--headless")
+    if autostart:
+        args.append("--autostart")
+    if data_dir:
+        args += ["--data-dir", str(data_dir)]
+    return args[0], args[1:]
+
+
+def build_task_xml(command: str, arguments: str, username: str) -> str:
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Date>{ts}</Date>
+    <Author>PyCombiner</Author>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{username}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{username}</UserId>
+      <LogonType>Password</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{command}</Command>
+      <Arguments>{arguments}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def shutil_which(name: str, env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    path_value = _env_lookup(env, "PATH", "")
+    for p in (path_value or "").split(os.pathsep):
         candidate = Path(p) / name
         if candidate.exists():
             return str(candidate)
     return None
+
+
+def find_python_executable(env: Optional[Dict[str, str]] = None) -> Optional[str]:
+    candidates: List[Path] = []
+    env_value = _env_lookup(env, "PYCOMBINER_PYTHON")
+    if not env_value:
+        env_value = _env_lookup(env, "PYTHON_EXE")
+    if env_value:
+        candidates.append(Path(env_value))
+    # Try PATH
+    for exe in ("python.exe", "python3.exe", "py.exe"):
+        p = shutil_which(exe, env=env)
+        if p:
+            candidates.append(Path(p))
+    # Try Windows py launcher directly
+    sysroot = _env_lookup(env, "SystemRoot", r"C:\Windows")
+    candidates.append(Path(sysroot) / "py.exe")
+
+    # Try registry (user + machine)
+    if os.name == "nt":
+        try:
+            import winreg
+
+            def _iter_install_paths(root, base):
+                try:
+                    with winreg.OpenKey(root, base) as key:
+                        i = 0
+                        while True:
+                            try:
+                                ver = winreg.EnumKey(key, i)
+                            except OSError:
+                                break
+                            i += 1
+                            try:
+                                with winreg.OpenKey(key, ver + "\\InstallPath") as k2:
+                                    try:
+                                        ip, _ = winreg.QueryValueEx(k2, "")
+                                        if ip:
+                                            yield Path(ip) / "python.exe"
+                                    except Exception:
+                                        pass
+                                    try:
+                                        ep, _ = winreg.QueryValueEx(
+                                            k2, "ExecutablePath")
+                                        if ep:
+                                            yield Path(ep)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                continue
+                except Exception:
+                    return
+
+            reg_paths = [
+                (winreg.HKEY_CURRENT_USER, r"Software\Python\PythonCore"),
+                (winreg.HKEY_LOCAL_MACHINE, r"Software\Python\PythonCore"),
+                (winreg.HKEY_LOCAL_MACHINE,
+                 r"Software\Wow6432Node\Python\PythonCore"),
+            ]
+            for root, base in reg_paths:
+                for p in _iter_install_paths(root, base):
+                    candidates.append(p)
+        except Exception:
+            pass
+
+    for c in candidates:
+        try:
+            if c.exists():
+                return str(c)
+        except Exception:
+            continue
+    return None
+
+
+def program_and_args_for_cmd(cmd: str, env: Optional[Dict[str, str]] = None) -> Tuple[str, List[str]]:
+    path = Path(cmd.strip().strip('"'))
+    suf = path.suffix.lower()
+    if suf == ".ps1":
+        pwsh = shutil_which("pwsh.exe", env=env) or shutil_which("pwsh", env=env)
+        if pwsh:
+            prog = pwsh
+        else:
+            prog = shutil_which("powershell.exe", env=env) or shutil_which("powershell", env=env) or "powershell.exe"
+        return prog, ["-NoLogo", "-ExecutionPolicy", "Bypass", "-File", str(path)]
+    if suf in (".bat", ".cmd"):
+        env_cmd = _env_lookup(env, "ComSpec")
+        if not env_cmd:
+            env_cmd = _env_lookup(env, "COMSPEC")
+        cmd_exe = env_cmd or shutil_which("cmd.exe", env=env) or "cmd.exe"
+        return cmd_exe, ["/c", str(path)]
+    if suf == ".exe":
+        return str(path), []
+    if suf == ".py":
+        # запуск .py: в сборке sys.executable указывает на PyCombiner.exe,
+        # поэтому ищем интерпретатор рядом со скриптом или используем системный.
+        venv_py = None
+        try:
+            cand = path.parent / ".venv"
+            if os.name == "nt":
+                vp = cand / "Scripts" / "python.exe"
+            else:
+                vp = cand / "bin" / "python3"
+            if vp.exists():
+                venv_py = str(vp)
+        except Exception:
+            pass
+        if venv_py:
+            return venv_py, ["-u", str(path)]
+        if not getattr(sys, "frozen", False):
+            return sys.executable, ["-u", str(path)]
+        py_exec = find_python_executable(env=env)
+        if py_exec:
+            if os.path.basename(py_exec).lower().startswith("py"):
+                return py_exec, ["-3", "-u", str(path)]
+            return py_exec, ["-u", str(path)]
+        if os.name == "nt":
+            return "py", ["-3", "-u", str(path)]
+        return "python3", ["-u", str(path)]
+    parts = shlex.split(cmd, posix=False)
+    return (parts[0], parts[1:]) if parts else (cmd, [])
+
+
+class HeadlessController(QtCore.QObject):
+    def __init__(self, cfg: Config, *, autostart: bool):
+        super().__init__()
+        self.cfg = cfg
+        self._language = cfg.data.get("language", Lang.System)
+        self._env_snapshot = _normalize_env_snapshot(cfg.data.get("env_snapshot"))
+        if not self._env_snapshot:
+            log_app("Headless: env snapshot missing, using system environment")
+        self._autostart = bool(autostart)
+        self._started_at = time.time()
+        self.projects: List[Project] = cfg.get_projects()
+        enabled_count = sum(1 for p in self.projects if p.enabled)
+        log_app(
+            f"Headless: config={CONFIG_PATH} projects={len(self.projects)} enabled={enabled_count} autostart={self._autostart}"
+        )
+        self._cmd_timer = QtCore.QTimer(self)
+        self._cmd_timer.timeout.connect(self._process_commands)
+        self._cmd_timer.start(1000)
+        self._state_timer = QtCore.QTimer(self)
+        self._state_timer.timeout.connect(self._write_state)
+        self._state_timer.start(1000)
+
+        self._write_pid()
+        self._write_state()
+        self._cleanup_stale_commands()
+
+        app = QtCore.QCoreApplication.instance()
+        if app:
+            app.aboutToQuit.connect(self._cleanup)
+
+        if autostart:
+            QtCore.QTimer.singleShot(300, self.start_enabled)
+
+    def _write_pid(self):
+        try:
+            DAEMON_PID_PATH.write_text(str(os.getpid()), "utf-8")
+        except Exception:
+            pass
+
+    def _cleanup(self):
+        try:
+            self.stop_all(reason="headless_exit")
+        except Exception:
+            pass
+        try:
+            if DAEMON_PID_PATH.exists():
+                DAEMON_PID_PATH.unlink()
+        except Exception:
+            pass
+
+    def _write_state(self):
+        write_state(self.projects)
+
+    def _is_stale_command(self, data: dict) -> bool:
+        try:
+            ts = float(data.get("ts") or 0)
+        except Exception:
+            ts = 0.0
+        return ts and ts < (self._started_at - 2)
+
+    def _cleanup_stale_commands(self) -> None:
+        ensure_dirs()
+        for path in COMMANDS_DIR.glob("cmd-*.json"):
+            try:
+                data = json.loads(path.read_text("utf-8"))
+            except Exception:
+                data = {}
+            if self._is_stale_command(data):
+                try:
+                    log_app(f"Headless: drop stale cmd {path.name}")
+                    path.unlink()
+                except Exception:
+                    pass
+
+    def _process_commands(self):
+        ensure_dirs()
+        for path in sorted(COMMANDS_DIR.glob("cmd-*.json")):
+            try:
+                data = json.loads(path.read_text("utf-8"))
+            except Exception:
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+                continue
+            if self._is_stale_command(data):
+                try:
+                    log_app(f"Headless: ignore stale cmd {data.get('action')} pid={data.get('pid')}")
+                finally:
+                    try:
+                        path.unlink()
+                    except Exception:
+                        pass
+                continue
+            action = (data.get("action") or "").lower()
+            pid = data.get("pid")
+            try:
+                log_app(f"Headless: cmd={action} pid={pid}")
+                if action == "start" and pid:
+                    self.start_project_by_pid(pid)
+                elif action == "stop" and pid:
+                    self.stop_project_by_pid(pid, reason="cmd_stop")
+                elif action == "restart" and pid:
+                    self.stop_project_by_pid(pid, reason="cmd_restart")
+                    self.start_project_by_pid(pid)
+                elif action == "stop_all":
+                    self.stop_all(reason="cmd_stop_all")
+                elif action == "start_enabled":
+                    self.start_enabled()
+                elif action == "reload":
+                    self.reload_config()
+            finally:
+                try:
+                    path.unlink()
+                except Exception:
+                    pass
+
+    def reload_config(self):
+        self.cfg.load()
+        self._env_snapshot = _normalize_env_snapshot(self.cfg.data.get("env_snapshot"))
+        new_projects = {p.pid: p for p in self.cfg.get_projects()}
+        current = {p.pid: p for p in self.projects}
+        # stop projects removed from config
+        for pid, p in list(current.items()):
+            if pid not in new_projects:
+                self.stop_project(p, reason="removed_from_config")
+                current.pop(pid, None)
+        # update existing and add new
+        updated: List[Project] = []
+        for pid, np in new_projects.items():
+            if pid in current:
+                cp = current[pid]
+                cp.name = np.name
+                cp.cmd = np.cmd
+                cp.cwd = np.cwd
+                cp.args = np.args
+                cp.enabled = np.enabled
+                cp.autorestart = np.autorestart
+                updated.append(cp)
+            else:
+                updated.append(np)
+        self.projects = updated
+        self._write_state()
+
+    def start_enabled(self):
+        enabled = [p for p in self.projects if p.enabled]
+        log_app(f"Headless: start_enabled -> {len(enabled)} project(s)")
+        for p in self.projects:
+            if p.enabled and not (p.process and p.process.state() == QtCore.QProcess.Running):
+                self.start_project(p)
+
+    def start_project_by_pid(self, pid: str):
+        for p in self.projects:
+            if p.pid == pid:
+                self.start_project(p)
+                return
+
+    def stop_project_by_pid(self, pid: str, reason: str = ""):
+        for p in self.projects:
+            if p.pid == pid:
+                self.stop_project(p, reason=reason or "cmd_stop")
+                return
+
+    def stop_all(self, reason: str = ""):
+        for p in self.projects:
+            self.stop_project(p, reason=reason or "stop_all")
+
+    def start_project(self, p: Project):
+        if p.process and p.process.state() == QtCore.QProcess.Running:
+            return
+        if not p.cmd:
+            log_app(f"Headless: skip start {p.name} (empty cmd)")
+            return
+
+        exclude = set()
+        for q in self.projects:
+            if q.process and q.process.state() == QtCore.QProcess.Running:
+                try:
+                    exclude.add(int(q.process.processId()))
+                except Exception:
+                    pass
+        conflict_running = any((q is not p) and q.process and q.process.state() == QtCore.QProcess.Running and (
+            q.cmd == p.cmd or (p.cwd and q.cwd and q.cwd == p.cwd)) for q in self.projects)
+        existing_pids: List[int] = []
+        if not conflict_running:
+            existing_pids = _win_find_project_pids(p.cmd, p.cwd, exclude)
+            if not existing_pids:
+                _win_kill_project_zombies(p.cmd, p.cwd, exclude)
+        if existing_pids:
+            p.external_pid = existing_pids[0]
+            p.status = "running"
+            self._write_state()
+            append_project_log(
+                p,
+                self._format_log(self._tr("log_adopted", pid=p.external_pid)),
+            )
+            log_app(f"Headless: adopt {p.name} pid={p.external_pid}")
+            return
+        env_snapshot = self._env_snapshot if self._env_snapshot else None
+        program, args = program_and_args_for_cmd(p.cmd, env=env_snapshot)
+        extra = (p.args or '').strip()
+        if extra:
+            try:
+                args += shlex.split(extra, posix=False)
+            except Exception:
+                args += extra.split()
+
+        proc = QtCore.QProcess(self)
+        env = build_process_environment(self._env_snapshot)
+        env.insert("PYTHONIOENCODING", "utf-8")
+        env.insert("COMBINER", "1")
+        proc.setProcessEnvironment(env)
+        proc.setProgram(program)
+        proc.setArguments(args)
+        if p.cwd:
+            proc.setWorkingDirectory(p.cwd)
+        proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
+        log_app(f"Headless: start {p.name} -> {program} {args} cwd={p.cwd}")
+
+        proc.readyReadStandardOutput.connect(
+            lambda p_=p, pr=proc: self._on_proc_output(p_, pr))
+        proc.readyReadStandardError.connect(
+            lambda p_=p, pr=proc: self._on_proc_output(p_, pr))
+        proc.finished.connect(lambda code, status,
+                              p_=p: self._on_proc_finished(p_, code, status))
+        proc.errorOccurred.connect(
+            lambda err, p_=p: self._on_proc_error(p_, err))
+        proc.started.connect(lambda p_=p: self._on_proc_started(p_))
+
+        p.stopping = False
+        p.external_pid = None
+        p.status = "starting"
+        self._write_state()
+        try:
+            proc.start()
+        except Exception as e:
+            log_app(f"Headless: start failed {p.name}: {e}")
+            append_project_log(p, self._format_log(
+                self._tr("log_start_error", err=e)))
+            p.status = "stopped"
+            self._write_state()
+            return
+
+        p.process = proc
+        append_project_log(
+            p,
+            self._format_log(self._tr("log_start", cmd=p.cmd)),
+        )
+
+    def stop_project(self, p: Project, reason: str = ""):
+        if reason:
+            log_app(f"Headless: stop {p.name} pid={p.pid} reason={reason}")
+        if p.process and p.process.state() == QtCore.QProcess.Running:
+            p.stopping = True
+            pid = int(p.process.processId() or 0)
+            try:
+                p.process.terminate()
+                if not p.process.waitForFinished(1500):
+                    _win_taskkill_tree(pid)
+            except Exception:
+                _win_taskkill_tree(pid)
+            finally:
+                p.process = None
+        else:
+            if p.external_pid and is_pid_running(int(p.external_pid)):
+                try:
+                    _win_taskkill_tree(int(p.external_pid))
+                except Exception:
+                    pass
+            else:
+                _win_kill_project_zombies(p.cmd, p.cwd)
+
+        p.status = "stopped"
+        p.external_pid = None
+        self._write_state()
+        append_project_log(p, self._format_log(self._tr("log_stop")))
+
+    def _on_proc_output(self, p: Project, pr: QtCore.QProcess):
+        data = pr.readAll().data()
+        text = decode_bytes(data)
+        if text:
+            append_project_log(p, text)
+
+    def _on_proc_started(self, p: Project):
+        p.status = "running"
+        p.external_pid = None
+        self._write_state()
+        log_app(f"Headless: running {p.name}")
+
+    def _on_proc_finished(self, p: Project, code: int, status: QtCore.QProcess.ExitStatus):
+        append_project_log(
+            p,
+            self._format_log(self._tr(
+                "log_finish",
+                code=code,
+                status=('CrashExit' if status == QtCore.QProcess.CrashExit else 'NormalExit')
+            )),
+        )
+        log_app(f"Headless: finished {p.name} code={code} status={status}")
+        was_stopping = p.stopping
+        p.status = "stopped" if (was_stopping or (status == QtCore.QProcess.NormalExit and code == 0)) else "crashed"
+        self._write_state()
+
+        pr_autorestart = (
+            p.autorestart and not was_stopping and status == QtCore.QProcess.CrashExit)
+        p.process = None
+        p.external_pid = None
+        if p.stopping:
+            p.stopping = False
+        if pr_autorestart:
+            QtCore.QTimer.singleShot(2000, lambda: self.start_project(p))
+
+    def _on_proc_error(self, p: Project, err: QtCore.QProcess.ProcessError):
+        append_project_log(p, self._format_log(
+            self._tr("log_proc_error", err=err)))
+        self._write_state()
+
+    def _format_log(self, text: str) -> str:
+        return f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] {text}\n"
+
+    def _tr(self, key: str, **kwargs) -> str:
+        return tr(self._language, key, **kwargs)
 
 
 # ------------------------ Главное окно -------------------------------------
@@ -823,6 +1717,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._language = self.cfg.data.get("language", Lang.System)
         self._syncing_selection = False
         self._syncing_autostart_task = False
+        self._client_mode = self._should_use_client_mode()
+        self._log_offsets: Dict[str, int] = {}
+        self._last_headless_spawn = 0.0
 
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.setWindowIcon(load_app_icon())
@@ -834,8 +1731,88 @@ class MainWindow(QtWidgets.QMainWindow):
         self.apply_language()
         self.apply_theme()
         QtCore.QTimer.singleShot(0, self.apply_theme)
+        self._update_daemon_indicator()
+        if self._client_mode:
+            self._state_timer = QtCore.QTimer(self)
+            self._state_timer.timeout.connect(self._refresh_state_from_file)
+            self._state_timer.start(1000)
+            self._log_timer = QtCore.QTimer(self)
+            self._log_timer.timeout.connect(self._poll_log_updates)
+            self._log_timer.start(700)
+            QtCore.QTimer.singleShot(0, self._refresh_state_from_file)
+            self._daemon_watch_timer = QtCore.QTimer(self)
+            self._daemon_watch_timer.timeout.connect(self._monitor_daemon)
+            self._daemon_watch_timer.start(1500)
+        else:
+            QtCore.QTimer.singleShot(300, self.on_start_enabled)
 
-        QtCore.QTimer.singleShot(300, self.on_start_enabled)
+    def _should_use_client_mode(self) -> bool:
+        if is_daemon_running():
+            return True
+        if is_state_fresh(5.0):
+            return True
+        return bool(self.cfg.data.get("autostart_task", False))
+
+    def _check_daemon_ready(self) -> None:
+        if is_daemon_running():
+            if getattr(self, "_wait_daemon_timer", None):
+                self._wait_daemon_timer.stop()
+            self._refresh_state_from_file()
+        self._update_daemon_indicator()
+
+    def _spawn_headless(self) -> bool:
+        try:
+            cmd, args = get_self_run_parts(
+                headless=True, data_dir=APPDATA_DIR, autostart=True)
+            env = dict(os.environ)
+            # Drop PyInstaller/Qt injection from GUI so headless starts clean.
+            for k in list(env.keys()):
+                if k.startswith("_PYI_"):
+                    env.pop(k, None)
+            for k in ("QT_PLUGIN_PATH", "QML2_IMPORT_PATH", "PYTHONPATH", "PYTHONHOME"):
+                env.pop(k, None)
+            flags = 0
+            if os.name == "nt":
+                flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+            subprocess.Popen(
+                [cmd] + args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+                env=env,
+            )
+            log_app("GUI: spawned headless controller")
+            return True
+        except Exception as e:
+            log_app(f"GUI: failed to spawn headless: {e}")
+            return False
+
+    def _monitor_daemon(self) -> None:
+        self._update_daemon_indicator()
+        if is_daemon_running():
+            return
+        if not bool(self.cfg.data.get("autostart_task", False)):
+            return
+        now = time.time()
+        if now - self._last_headless_spawn < 10:
+            return
+        if self._spawn_headless():
+            self._last_headless_spawn = now
+
+    def _update_daemon_indicator(self) -> None:
+        if not getattr(self, "lbl_daemon", None):
+            return
+        pid = read_daemon_pid()
+        if pid:
+            text = self._tr("headless_connected", pid=pid)
+            color = self._status_color("running").name()
+        else:
+            text = self._tr("headless_disconnected")
+            color = self._status_color("stopped").name()
+        self.lbl_daemon.setText(text)
+        self.lbl_daemon.setStyleSheet(f"color: {color}; font-weight: 600;")
     # ---------- UI ----------
 
     def _build_ui(self):
@@ -867,6 +1844,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for b in (self.btn_add, self.btn_edit, self.btn_del, self.btn_start, self.btn_stop, self.btn_restart, self.btn_start_enabled, self.btn_stop_all):
             btns.addWidget(b)
         btns.addStretch(1)
+        self.lbl_daemon = QtWidgets.QLabel()
+        self.lbl_daemon.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        btns.addWidget(self.lbl_daemon)
 
         # список проектов
         self.tree = QtWidgets.QTreeWidget()
@@ -1024,6 +2004,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 p.switch.update()
             self._apply_status_style(p)
             self._apply_tab_status(p)
+        self._update_daemon_indicator()
 
         # обновить состояние меню
         self.act_theme_system.setChecked(theme == Theme.System)
@@ -1054,6 +2035,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # Вкладки логов
         self.btn_clear_log.setText(self._tr("tab_clear"))
         self.btn_clear_log.setToolTip(self._tr("tab_clear_tip"))
+
+        self._update_daemon_indicator()
 
         # Меню
         self.menu_file.setTitle(self._tr("menu_file"))
@@ -1132,6 +2115,80 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.tabs.tabBar().setTabTextColor(idx, QtGui.QColor())
 
+    def _project_by_tab_index(self, index: int) -> Optional[Project]:
+        if index < 0 or index >= len(self.projects):
+            return None
+        return self.projects[index]
+
+    def _load_log_tail(self, p: Project) -> None:
+        if not p.log:
+            return
+        path = log_path_for_project(p)
+        text = read_log_tail(path, LOG_MAX_LINES)
+        p.log.setPlainText(text)
+        try:
+            p.log.moveCursor(QtGui.QTextCursor.End)
+            sb = p.log.verticalScrollBar()
+            sb.setValue(sb.maximum())
+        except Exception:
+            pass
+        try:
+            self._log_offsets[p.pid] = path.stat().st_size
+        except Exception:
+            self._log_offsets[p.pid] = 0
+
+    def _poll_log_updates(self) -> None:
+        idx = self.tabs.currentIndex()
+        p = self._project_by_tab_index(idx)
+        if not p or not p.log:
+            return
+        path = log_path_for_project(p)
+        offset = self._log_offsets.get(p.pid, 0)
+        text, new_offset = read_log_from_offset(path, offset)
+        if text:
+            try:
+                sb = p.log.verticalScrollBar()
+                at_bottom = sb.value() >= (sb.maximum() - 2)
+                if at_bottom:
+                    p.log.append_text(text)
+                    sb.setValue(sb.maximum())
+                else:
+                    val = sb.value()
+                    p.log.append_text(text)
+                    sb.setValue(val)
+            except Exception:
+                p.log.append_text(text)
+        self._log_offsets[p.pid] = new_offset
+
+    def _refresh_state_from_file(self) -> None:
+        state = read_state()
+        items = {p.get("pid"): p for p in state.get("projects", []) if p.get("pid")}
+        for p in self.projects:
+            sp = items.get(p.pid)
+            if not sp:
+                continue
+            new_status = sp.get("status", p.status)
+            if new_status != p.status:
+                p.status = new_status
+                self._update_row_status(p)
+        self._update_daemon_indicator()
+
+    def _send_command(self, action: str, pid: Optional[str] = None) -> None:
+        ensure_dirs()
+        payload = {
+            "id": uuid.uuid4().hex,
+            "action": action,
+            "pid": pid,
+            "ts": time.time(),
+        }
+        path = COMMANDS_DIR / f"cmd-{payload['id']}.json"
+        tmp = COMMANDS_DIR / f"cmd-{payload['id']}.tmp"
+        try:
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), "utf-8")
+            tmp.replace(path)
+        except Exception:
+            pass
+
     def _apply_app_autostart_settings(self, data: dict) -> None:
         run_enabled = data.get("app_autostart_run")
         task_enabled = data.get("app_autostart_task")
@@ -1174,6 +2231,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tabs.addTab(te, p.name)
             p.log = te
             self._apply_tab_status(p)
+            self._log_offsets[p.pid] = 0
+            if self._client_mode:
+                self._load_log_tail(p)
 
         if self.tree.topLevelItemCount() > 0:
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
@@ -1182,6 +2242,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_switch_toggled(self, p: Project, checked: bool) -> None:
         p.enabled = checked
         self.cfg.set_projects(self.projects)
+        if self._client_mode:
+            self._send_command("reload")
 
     def _selected_project(self) -> Optional[Project]:
         it = self.tree.currentItem()
@@ -1204,6 +2266,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if idx >= 0:
                 self.tabs.setTabText(idx, p.name)
         self._apply_tab_status(p)
+        if not self._client_mode:
+            write_state(self.projects)
 
     # ---------- кнопки ----------
     def on_add(self):
@@ -1222,6 +2286,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.projects.append(p)
             self.cfg.set_projects(self.projects)
             self._populate_projects()
+            if self._client_mode:
+                self._send_command("reload")
 
     def on_edit(self):
         p = self._selected_project()
@@ -1259,37 +2325,63 @@ class MainWindow(QtWidgets.QMainWindow):
                 p.switch.setChecked(p.enabled)
                 p.switch.blockSignals(False)
             self.cfg.set_projects(self.projects)
+            if self._client_mode:
+                self._send_command("reload")
 
     def on_delete(self):
         p = self._selected_project()
         if not p:
             return
-        if p.process and p.process.state() == QtCore.QProcess.Running:
+        if (p.process and p.process.state() == QtCore.QProcess.Running) or (
+            self._client_mode and (p.status or "").strip().lower() in ("running", "starting")
+        ):
             QtWidgets.QMessageBox.warning(
                 self, APP_NAME, self._tr("msg_stop_running"))
             return
         self.projects = [x for x in self.projects if x.pid != p.pid]
         self.cfg.set_projects(self.projects)
         self._populate_projects()
+        if self._client_mode:
+            self._send_command("reload")
 
     def on_start_selected(self):
         p = self._selected_project()
-        if p:
-            self.start_project(p)
+        if not p:
+            return
+        if self._client_mode:
+            p.status = "starting"
+            self._update_row_status(p)
+            self._send_command("start", p.pid)
+            return
+        self.start_project(p)
 
     def on_stop_selected(self):
         p = self._selected_project()
-        if p:
-            self.stop_project(p)
+        if not p:
+            return
+        if self._client_mode:
+            p.status = "stopped"
+            self._update_row_status(p)
+            self._send_command("stop", p.pid)
+            return
+        self.stop_project(p)
 
     def on_restart_selected(self):
         p = self._selected_project()
         if not p:
             return
+        if self._client_mode:
+            p.status = "starting"
+            self._update_row_status(p)
+            self._send_command("restart", p.pid)
+            return
         self.stop_project(p)
         self.start_project(p)
 
     def on_start_enabled(self):
+        if self._client_mode:
+            self._send_command("start_enabled")
+            return
         targets = [p for p in self.projects if p.enabled and not (
             p.process and p.process.state() == QtCore.QProcess.Running)]
         if not targets:
@@ -1307,6 +2399,9 @@ class MainWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(250, self._start_enabled_next)
 
     def on_stop_all(self):
+        if self._client_mode:
+            self._send_command("stop_all")
+            return
         for p in self.projects:
             self.stop_project(p)
 
@@ -1314,9 +2409,18 @@ class MainWindow(QtWidgets.QMainWindow):
         idx = self.tabs.currentIndex()
         if idx < 0:
             return
+        p = self._project_by_tab_index(idx)
         widget = self.tabs.widget(idx)
         if isinstance(widget, LogView):
             widget.clear()
+        if p:
+            path = log_path_for_project(p)
+            try:
+                path.write_text("", "utf-8")
+            except Exception:
+                pass
+            _clear_log_backups(path)
+            self._log_offsets[p.pid] = 0
 
     # ---------- автозапуск ----------
     def on_toggle_autostart(self, enabled: bool):
@@ -1384,43 +2488,6 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, APP_NAME, text)
 
     # ---------- запуск/стоп процессов ----------
-    def _program_and_args_for_cmd(self, cmd: str) -> Tuple[str, List[str]]:
-        path = Path(cmd.strip().strip('"'))
-        suf = path.suffix.lower()
-        if suf == ".ps1":
-            prog = "pwsh.exe" if shutil_which(
-                "pwsh.exe") or shutil_which("pwsh") else "powershell.exe"
-            return prog, ["-NoLogo", "-ExecutionPolicy", "Bypass", "-File", str(path)]
-        if suf in (".bat", ".cmd"):
-            return "cmd.exe", ["/c", str(path)]
-        if suf == ".exe":
-            return str(path), []
-        if suf == ".py":
-            # запуск .py: в сборке sys.executable указывает на PyCombiner.exe,
-            # поэтому ищем интерпретатор рядом со скриптом или используем системный.
-            # 1) локальный venv рядом со скриптом
-            venv_py = None
-            try:
-                cand = path.parent / ".venv"
-                if os.name == "nt":
-                    vp = cand / "Scripts" / "python.exe"
-                else:
-                    vp = cand / "bin" / "python3"
-                if vp.exists():
-                    venv_py = str(vp)
-            except Exception:
-                pass
-            if venv_py:
-                return venv_py, ["-u", str(path)]
-            # 2) если не frozen — можно использовать текущий интерпретатор
-            if not getattr(sys, "frozen", False):
-                return sys.executable, ["-u", str(path)]
-            # 3) запасной вариант: системный python
-            if os.name == "nt":
-                return "py", ["-3", "-u", str(path)]
-            return "python3", ["-u", str(path)]
-        parts = shlex.split(cmd, posix=False)
-        return (parts[0], parts[1:]) if parts else (cmd, [])
 
     def start_project(self, p: Project):
         if p.process and p.process.state() == QtCore.QProcess.Running:
@@ -1444,7 +2511,7 @@ class MainWindow(QtWidgets.QMainWindow):
             q.cmd == p.cmd or (p.cwd and q.cwd and q.cwd == p.cwd)) for q in self.projects)
         if not conflict_running:
             _win_kill_project_zombies(p.cmd, p.cwd, exclude)
-        program, args = self._program_and_args_for_cmd(p.cmd)
+        program, args = program_and_args_for_cmd(p.cmd)
         # Добавим пользовательские параметры запуска
         extra = (p.args or '').strip()
         if extra:
@@ -1462,11 +2529,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if p.cwd:
             proc.setWorkingDirectory(p.cwd)
         proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
-        env = QtCore.QProcessEnvironment.systemEnvironment()
-        env.insert("PYTHONIOENCODING", "utf-8")
-        env.insert("COMBINER", "1")
-        env.insert("PYTHONIOENCODING", "utf-8")
-        proc.setProcessEnvironment(env)
 
         proc.readyReadStandardOutput.connect(
             lambda p_=p, pr=proc: self._on_proc_output(p_, pr))
@@ -1486,6 +2548,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             if p.log:
                 p.log.append_text(self._tr("log_start_error", err=e) + "\n")
+            append_project_log(p, self._tr("log_start_error", err=e) + "\n")
             p.status = "stopped"
             self._update_row_status(p)
             return
@@ -1495,6 +2558,11 @@ class MainWindow(QtWidgets.QMainWindow):
             p.log.append_text(
                 f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] "
                 f"{self._tr('log_start', cmd=p.cmd)}\n")
+        append_project_log(
+            p,
+            f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] "
+            f"{self._tr('log_start', cmd=p.cmd)}\n",
+        )
 
     def _on_proc_started(self, p: Project):
         p.status = "running"
@@ -1523,12 +2591,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] "
                 f"{self._tr('log_stop')}\n"
             )
+        append_project_log(
+            p,
+            f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] "
+            f"{self._tr('log_stop')}\n",
+        )
 
     def _on_proc_output(self, p: Project, pr: QtCore.QProcess):
         data = pr.readAll().data()
         text = decode_bytes(data)
         if p.log and text:
             p.log.append_text(text)
+        if text:
+            append_project_log(p, text)
 
     def _on_proc_finished(self, p: Project, code: int, status: QtCore.QProcess.ExitStatus):
         if p.log:
@@ -1536,6 +2611,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] "
                 f"{self._tr('log_finish', code=code, status=('CrashExit' if status==QtCore.QProcess.CrashExit else 'NormalExit'))}\n"
             )
+        append_project_log(
+            p,
+            f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] "
+            f"{self._tr('log_finish', code=code, status=('CrashExit' if status==QtCore.QProcess.CrashExit else 'NormalExit'))}\n",
+        )
         was_stopping = p.stopping
         p.status = "stopped" if (was_stopping or (status == QtCore.QProcess.NormalExit and code == 0)) else "crashed"
         self._update_row_status(p)
@@ -1552,6 +2632,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_proc_error(self, p: Project, err: QtCore.QProcess.ProcessError):
         if p.log:
             p.log.append_text(self._tr("log_proc_error", err=err) + "\n")
+        append_project_log(p, self._tr("log_proc_error", err=err) + "\n")
 
     def _on_selection_changed(self):
         if self._syncing_selection:
@@ -1583,6 +2664,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tree.setCurrentItem(prj.item)
         finally:
             self._syncing_selection = False
+        if self._client_mode:
+            self._load_log_tail(prj)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         # Реальный выход по крестику
@@ -1590,22 +2673,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.cfg.set_projects(self.projects)
         except Exception:
             traceback.print_exc()
-        # Остановка всех процессов
-        for p in self.projects:
-            try:
-                self.stop_project(p)
-            except Exception:
-                pass
-        QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 50)
-        for p in self.projects:
-            try:
-                if p.process and p.process.state() == QtCore.QProcess.Running:
-                    pid = int(p.process.processId() or 0)
-                    _win_taskkill_tree(pid)
-                    p.process.waitForFinished(800)
-                p.log = None
-            except Exception:
-                pass
+        if not self._client_mode:
+            # Остановка всех процессов
+            for p in self.projects:
+                try:
+                    self.stop_project(p)
+                except Exception:
+                    pass
+            QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 50)
+            for p in self.projects:
+                try:
+                    if p.process and p.process.state() == QtCore.QProcess.Running:
+                        pid = int(p.process.processId() or 0)
+                        _win_taskkill_tree(pid)
+                        p.process.waitForFinished(800)
+                    p.log = None
+                except Exception:
+                    pass
         super().closeEvent(event)
 
     def showEvent(self, e: QtGui.QShowEvent) -> None:
@@ -1795,11 +2879,36 @@ class ProjectDialog(QtWidgets.QDialog):
 # ------------------------ main ---------------------------------------------
 
 def main():
-    ensure_dirs()
     parser = argparse.ArgumentParser()
     parser.add_argument("--autostart", action="store_true",
                         help="Запустить включённые проекты автоматически.")
+    parser.add_argument("--headless", action="store_true",
+                        help="Запуск без интерфейса (фоновый контроллер).")
+    parser.add_argument("--data-dir", default="",
+                        help="Переопределить папку данных PyCombiner.")
     args = parser.parse_args()
+
+    if args.data_dir:
+        set_data_dir(args.data_dir)
+    ensure_dirs()
+    install_debug_handlers()
+
+    cfg = Config(CONFIG_PATH)
+    if not args.headless:
+        maybe_update_env_snapshot(cfg)
+    if bool(cfg.data.get("autostart_run", False)):
+        set_windows_run_autostart(True)
+    if args.headless:
+        if is_daemon_running():
+            return
+        app = QtCore.QCoreApplication(sys.argv)
+        log_app(
+            f"Headless controller start autostart={args.autostart} data_dir={APPDATA_DIR}"
+        )
+        controller = HeadlessController(cfg, autostart=args.autostart)
+        # keep reference, otherwise GC may stop timers in headless mode
+        app._headless_controller = controller  # type: ignore[attr-defined]
+        sys.exit(app.exec())
 
     app = QtWidgets.QApplication(sys.argv)
     app.setOrganizationName(ORG_NAME)
@@ -1811,13 +2920,10 @@ def main():
     except Exception:
         pass
 
-    cfg = Config(CONFIG_PATH)
     win = MainWindow(cfg)
     win.resize(1200, 800)
     win.show()
-
-    if args.autostart:
-        QtCore.QTimer.singleShot(500, win.on_start_enabled)
+    log_app("GUI started")
 
     sys.exit(app.exec())
 
