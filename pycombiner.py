@@ -64,6 +64,7 @@ LOG_ROTATE_MAX_BYTES = 5 * 1024 * 1024
 LOG_ROTATE_COUNT = 3
 PID_CACHE_TTL_SEC = 2.0
 _PID_CACHE: Dict[int, Tuple[float, bool]] = {}
+PENDING_STATUS_GRACE_SEC = 3.0
 
 
 # ------------------------ Утилиты ------------------------------------------
@@ -388,6 +389,7 @@ STRINGS = {
         "dlg_filter_cmd": "Скрипты/исполняемые (*.ps1 *.bat *.cmd *.exe *.py);;Все файлы (*.*)",
         "dlg_chk_enabled": "Включать при старте",
         "dlg_chk_autorst": "Авто‑перезапуск при падении",
+        "dlg_chk_clear_log": "Очищать лог при старте",
         "dlg_app_autostart_group": "Автозапуск приложения",
         "dlg_app_autostart_run": "Запускать PyCombiner при входе в Windows",
         "dlg_app_autostart_task": "Запускать PyCombiner при старте Windows (без входа)",
@@ -460,6 +462,7 @@ STRINGS = {
         "dlg_filter_cmd": "Scripts/Executables (*.ps1 *.bat *.cmd *.exe *.py);;All files (*.*)",
         "dlg_chk_enabled": "Enable on startup",
         "dlg_chk_autorst": "Auto‑restart on crash",
+        "dlg_chk_clear_log": "Clear log on start",
         "dlg_app_autostart_group": "App autostart",
         "dlg_app_autostart_run": "Start PyCombiner on Windows login",
         "dlg_app_autostart_task": "Start PyCombiner at Windows startup (no login)",
@@ -480,12 +483,14 @@ STATUS_LABELS = {
     Lang.RU: {
         "running": "работает",
         "starting": "запуск",
+        "stopping": "остановка",
         "stopped": "остановлен",
         "crashed": "ошибка",
     },
     Lang.EN: {
         "running": "running",
         "starting": "starting",
+        "stopping": "stopping",
         "stopped": "stopped",
         "crashed": "crashed",
     },
@@ -686,6 +691,7 @@ class Project:
     args: str = ""
     enabled: bool = False
     autorestart: bool = True
+    clear_log_on_start: bool = False
     status: str = "stopped"
 
     # runtime (не сериализуем):
@@ -710,6 +716,7 @@ class Project:
             "cwd": self.cwd, "args": self.args,
             "enabled": self.enabled,
             "autorestart": self.autorestart,
+            "clear_log_on_start": self.clear_log_on_start,
             "status": self.status,
         }
 
@@ -723,6 +730,7 @@ class Project:
             args=str(d.get("args", "")),
             enabled=bool(d.get("enabled", False)),
             autorestart=bool(d.get("autorestart", True)),
+            clear_log_on_start=bool(d.get("clear_log_on_start", False)),
             status=d.get("status", "stopped"),
         )
 
@@ -1578,6 +1586,13 @@ class HeadlessController(QtCore.QObject):
             )
             log_app(f"Headless: adopt {p.name} pid={p.external_pid}")
             return
+        if p.clear_log_on_start:
+            try:
+                path = log_path_for_project(p)
+                path.write_text("", "utf-8")
+                _clear_log_backups(path)
+            except Exception:
+                pass
         env_snapshot = self._env_snapshot if self._env_snapshot else None
         program, args = program_and_args_for_cmd(p.cmd, env=env_snapshot)
         extra = (p.args or '').strip()
@@ -1719,6 +1734,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._syncing_autostart_task = False
         self._client_mode = self._should_use_client_mode()
         self._log_offsets: Dict[str, int] = {}
+        self._pending_actions: Dict[str, Tuple[str, float]] = {}
         self._last_headless_spawn = 0.0
 
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
@@ -1902,6 +1918,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.tree.itemSelectionChanged.connect(self._on_selection_changed)
         self.tabs.currentChanged.connect(self._on_tab_changed)
+        self._refresh_action_buttons()
 
     def _build_menu(self):
         mb = self.menuBar()
@@ -2090,6 +2107,7 @@ class MainWindow(QtWidgets.QMainWindow):
         palette = {
             "running": "#16a34a" if is_light else "#22c55e",
             "starting": "#d97706" if is_light else "#f59e0b",
+            "stopping": "#d97706" if is_light else "#f59e0b",
             "stopped": "#dc2626" if is_light else "#f87171",
             "crashed": "#b91c1c" if is_light else "#ef4444",
         }
@@ -2137,6 +2155,17 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             self._log_offsets[p.pid] = 0
 
+    def _clear_log_for_project(self, p: Project) -> None:
+        if p.log:
+            p.log.clear()
+        path = log_path_for_project(p)
+        try:
+            path.write_text("", "utf-8")
+        except Exception:
+            pass
+        _clear_log_backups(path)
+        self._log_offsets[p.pid] = 0
+
     def _poll_log_updates(self) -> None:
         idx = self.tabs.currentIndex()
         p = self._project_by_tab_index(idx)
@@ -2168,6 +2197,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if not sp:
                 continue
             new_status = sp.get("status", p.status)
+            if self._should_ignore_status_update(p, new_status):
+                continue
             if new_status != p.status:
                 p.status = new_status
                 self._update_row_status(p)
@@ -2238,6 +2269,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tree.topLevelItemCount() > 0:
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
             self.tabs.setCurrentIndex(0)
+        self._refresh_action_buttons()
 
     def _on_switch_toggled(self, p: Project, checked: bool) -> None:
         p.enabled = checked
@@ -2255,6 +2287,31 @@ class MainWindow(QtWidgets.QMainWindow):
                 return p
         return None
 
+    def _refresh_action_buttons(self) -> None:
+        p = self._selected_project()
+        if not p:
+            for btn in (self.btn_start, self.btn_stop, self.btn_restart, self.btn_edit, self.btn_del):
+                btn.setEnabled(False)
+            self.btn_start_enabled.setEnabled(False)
+            self.btn_stop_all.setEnabled(False)
+            return
+
+        status = (p.status or "").strip().lower()
+        can_start = status in ("stopped", "crashed")
+        can_stop = status in ("running", "starting", "stopping")
+        can_restart = status in ("running", "starting", "stopped", "crashed")
+
+        self.btn_start.setEnabled(can_start)
+        self.btn_stop.setEnabled(can_stop)
+        self.btn_restart.setEnabled(can_restart and status != "stopping")
+        self.btn_edit.setEnabled(True)
+        self.btn_del.setEnabled(status in ("stopped", "crashed") or (not self._client_mode))
+
+        can_start_enabled = any((pr.status or "").strip().lower() in ("stopped", "crashed") and pr.enabled for pr in self.projects)
+        can_stop_all = any((pr.status or "").strip().lower() in ("running", "starting", "stopping") for pr in self.projects)
+        self.btn_start_enabled.setEnabled(can_start_enabled)
+        self.btn_stop_all.setEnabled(can_stop_all)
+
     def _update_row_status(self, p: Project):
         if p.item:
             p.item.setText(2, self._status_label(p.status))
@@ -2268,6 +2325,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_tab_status(p)
         if not self._client_mode:
             write_state(self.projects)
+        self._refresh_action_buttons()
+
+    def _set_pending_action(self, p: Project, action: str) -> None:
+        self._pending_actions[p.pid] = (action, time.monotonic())
+
+    def _should_ignore_status_update(self, p: Project, new_status: str) -> bool:
+        pending = self._pending_actions.get(p.pid)
+        if not pending:
+            return False
+        action, ts = pending
+        if (time.monotonic() - ts) > PENDING_STATUS_GRACE_SEC:
+            self._pending_actions.pop(p.pid, None)
+            return False
+        status = (new_status or "").strip().lower()
+        if action == "start":
+            if status in ("stopped", "crashed", "stopping"):
+                return True
+            if status == "running":
+                self._pending_actions.pop(p.pid, None)
+        elif action == "stop":
+            if status in ("running", "starting", "stopping"):
+                return True
+            if status in ("stopped", "crashed"):
+                self._pending_actions.pop(p.pid, None)
+        elif action == "restart":
+            if status in ("stopped", "stopping"):
+                return True
+            if status == "running":
+                self._pending_actions.pop(p.pid, None)
+        return False
 
     # ---------- кнопки ----------
     def on_add(self):
@@ -2312,6 +2399,7 @@ class MainWindow(QtWidgets.QMainWindow):
             p.args = d.get("args", "")
             p.autorestart = d["autorestart"]
             p.enabled = d["enabled"]
+            p.clear_log_on_start = bool(d.get("clear_log_on_start", False))
             if p.item is not None:
                 p.item.setText(1, p.name)
                 p.item.setText(3, p.cmd)
@@ -2349,8 +2437,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not p:
             return
         if self._client_mode:
+            if p.clear_log_on_start:
+                self._clear_log_for_project(p)
             p.status = "starting"
             self._update_row_status(p)
+            self._set_pending_action(p, "start")
             self._send_command("start", p.pid)
             return
         self.start_project(p)
@@ -2360,8 +2451,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not p:
             return
         if self._client_mode:
-            p.status = "stopped"
+            p.status = "stopping"
             self._update_row_status(p)
+            self._set_pending_action(p, "stop")
             self._send_command("stop", p.pid)
             return
         self.stop_project(p)
@@ -2373,6 +2465,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._client_mode:
             p.status = "starting"
             self._update_row_status(p)
+            self._set_pending_action(p, "restart")
             self._send_command("restart", p.pid)
             return
         self.stop_project(p)
@@ -2380,6 +2473,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_start_enabled(self):
         if self._client_mode:
+            for p in self.projects:
+                if p.enabled and (p.status or "").strip().lower() in ("stopped", "crashed"):
+                    if p.clear_log_on_start:
+                        self._clear_log_for_project(p)
+                    p.status = "starting"
+                    self._update_row_status(p)
+                    self._set_pending_action(p, "start")
             self._send_command("start_enabled")
             return
         targets = [p for p in self.projects if p.enabled and not (
@@ -2400,6 +2500,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_stop_all(self):
         if self._client_mode:
+            for p in self.projects:
+                if (p.status or "").strip().lower() in ("running", "starting", "stopping"):
+                    p.status = "stopping"
+                    self._update_row_status(p)
+                    self._set_pending_action(p, "stop")
             self._send_command("stop_all")
             return
         for p in self.projects:
@@ -2410,17 +2515,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if idx < 0:
             return
         p = self._project_by_tab_index(idx)
-        widget = self.tabs.widget(idx)
-        if isinstance(widget, LogView):
-            widget.clear()
         if p:
-            path = log_path_for_project(p)
-            try:
-                path.write_text("", "utf-8")
-            except Exception:
-                pass
-            _clear_log_backups(path)
-            self._log_offsets[p.pid] = 0
+            self._clear_log_for_project(p)
 
     # ---------- автозапуск ----------
     def on_toggle_autostart(self, enabled: bool):
@@ -2511,6 +2607,8 @@ class MainWindow(QtWidgets.QMainWindow):
             q.cmd == p.cmd or (p.cwd and q.cwd and q.cwd == p.cwd)) for q in self.projects)
         if not conflict_running:
             _win_kill_project_zombies(p.cmd, p.cwd, exclude)
+        if p.clear_log_on_start:
+            self._clear_log_for_project(p)
         program, args = program_and_args_for_cmd(p.cmd)
         # Добавим пользовательские параметры запуска
         extra = (p.args or '').strip()
@@ -2572,6 +2670,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # мягко → жёстко → зачистка зомби
         if p.process and p.process.state() == QtCore.QProcess.Running:
             p.stopping = True
+            p.status = "stopping"
+            self._update_row_status(p)
             pid = int(p.process.processId() or 0)
             try:
                 p.process.terminate()
@@ -2650,6 +2750,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 finally:
                     self._syncing_selection = False
                 break
+        self._refresh_action_buttons()
 
     def _on_tab_changed(self, index: int):
         if self._syncing_selection:
@@ -2796,6 +2897,8 @@ class ProjectDialog(QtWidgets.QDialog):
         self.chk_autorst.setChecked(True)
         lay.addWidget(self.chk_enabled)
         lay.addWidget(self.chk_autorst)
+        self.chk_clear_log = QtWidgets.QCheckBox(self._tr("dlg_chk_clear_log"))
+        lay.addWidget(self.chk_clear_log)
 
         self.grp_autostart = QtWidgets.QGroupBox(
             self._tr("dlg_app_autostart_group"))
@@ -2828,6 +2931,7 @@ class ProjectDialog(QtWidgets.QDialog):
             self.ed_args.setText(init.get("args", ""))
             self.chk_enabled.setChecked(bool(init.get("enabled", False)))
             self.chk_autorst.setChecked(bool(init.get("autorestart", True)))
+            self.chk_clear_log.setChecked(bool(init.get("clear_log_on_start", False)))
         if autostart_run is not None:
             self.chk_app_autostart_run.setChecked(bool(autostart_run))
         if autostart_task is not None:
@@ -2871,6 +2975,7 @@ class ProjectDialog(QtWidgets.QDialog):
             "args": self.ed_args.text().strip(),
             "enabled": self.chk_enabled.isChecked(),
             "autorestart": self.chk_autorst.isChecked(),
+            "clear_log_on_start": self.chk_clear_log.isChecked(),
             "app_autostart_run": self.chk_app_autostart_run.isChecked(),
             "app_autostart_task": self.chk_app_autostart_task.isChecked(),
         }
