@@ -44,7 +44,7 @@ def _strip_ansi(text: str) -> str:
 
 # ------------------------ Константы/пути -----------------------------------
 APP_NAME = "PyCombiner"
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 ORG_NAME = "PyCombiner"
 AUTOSTART_TASK_NAME = "PyCombiner Startup"
 
@@ -739,6 +739,8 @@ class Project:
         default=False, repr=False, compare=False, init=False)
     external_pid: Optional[int] = field(
         default=None, repr=False, compare=False, init=False)
+    restart_pending: bool = field(
+        default=False, repr=False, compare=False, init=False)
 
     def to_dict(self) -> dict:
         return {
@@ -1546,8 +1548,7 @@ class HeadlessController(QtCore.QObject):
                 elif action == "stop" and pid:
                     self.stop_project_by_pid(pid, reason="cmd_stop")
                 elif action == "restart" and pid:
-                    self.stop_project_by_pid(pid, reason="cmd_restart")
-                    self.start_project_by_pid(pid)
+                    self.restart_project_by_pid(pid)
                 elif action == "stop_all":
                     self.stop_all(reason="cmd_stop_all")
                 elif action == "start_enabled":
@@ -1600,11 +1601,28 @@ class HeadlessController(QtCore.QObject):
                 self.start_project(p)
                 return
 
+    def restart_project_by_pid(self, pid: str):
+        for p in self.projects:
+            if p.pid == pid:
+                self.restart_project(p)
+                return
+
     def stop_project_by_pid(self, pid: str, reason: str = ""):
         for p in self.projects:
             if p.pid == pid:
                 self.stop_project(p, reason=reason or "cmd_stop")
                 return
+
+    def restart_project(self, p: Project) -> None:
+        if p.process and p.process.state() == QtCore.QProcess.Running:
+            p.restart_pending = True
+            self.stop_project(p, reason="cmd_restart")
+            return
+        # нет активного процесса — останавливаем зомби и сразу запускаем
+        p.restart_pending = False
+        p.stopping = False
+        self.stop_project(p, reason="cmd_restart")
+        self.start_project(p)
 
     def stop_all(self, reason: str = ""):
         for p in self.projects:
@@ -1765,6 +1783,10 @@ class HeadlessController(QtCore.QObject):
         p.external_pid = None
         if p.stopping:
             p.stopping = False
+        if p.restart_pending:
+            p.restart_pending = False
+            QtCore.QTimer.singleShot(300, lambda: self.start_project(p))
+            return
         if pr_autorestart:
             QtCore.QTimer.singleShot(2000, lambda: self.start_project(p))
 
