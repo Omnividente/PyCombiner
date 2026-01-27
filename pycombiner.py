@@ -44,7 +44,7 @@ def _strip_ansi(text: str) -> str:
 
 # ------------------------ Константы/пути -----------------------------------
 APP_NAME = "PyCombiner"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 ORG_NAME = "PyCombiner"
 AUTOSTART_TASK_NAME = "PyCombiner Startup"
 
@@ -65,6 +65,8 @@ LOG_ROTATE_COUNT = 3
 PID_CACHE_TTL_SEC = 2.0
 _PID_CACHE: Dict[int, Tuple[float, bool]] = {}
 PENDING_STATUS_GRACE_SEC = 3.0
+NETWORK_CHECK_INTERVAL_SEC = 10
+NETWORK_CHECK_TIMEOUT_SEC = 3
 
 
 # ------------------------ Утилиты ------------------------------------------
@@ -229,6 +231,30 @@ def decode_bytes(data: bytes) -> str:
             return data.decode("cp1251", errors="replace")
 
 
+def is_network_ready() -> bool:
+    if os.name != "nt":
+        return True
+    try:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        ps = (
+            "Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue "
+            "| Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' } "
+            "| Select-Object -First 1 -ExpandProperty IPAddress"
+        )
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command", ps],
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            creationflags=flags,
+            timeout=NETWORK_CHECK_TIMEOUT_SEC,
+        )
+        return bool(out.strip())
+    except Exception:
+        # Fail-open to avoid blocking launches on unexpected errors.
+        return True
+
+
 # ------------------------ DWM / заголовок / Mica ---------------------------
 
 def _dwm_set_attribute(hwnd: int, attr: int, value: int) -> None:
@@ -372,6 +398,7 @@ STRINGS = {
         "log_adopted": "Уже запущен (pid={pid}), подхвачен.",
         "log_start_error": "[!] Ошибка запуска: {err}",
         "log_proc_error": "[!] Ошибка процесса: {err}",
+        "log_wait_net": "Ожидаю сеть...",
         "about_text": "{app}\nКомбайн процессов с Fluent-оформлением.\nКонфиг: {config}\nЛоги: {logs}",
         "tray_show": "Показать окно",
         "tray_start_enabled": "Старт включённых",
@@ -445,6 +472,7 @@ STRINGS = {
         "log_adopted": "Already running (pid={pid}), adopted.",
         "log_start_error": "[!] Start error: {err}",
         "log_proc_error": "[!] Process error: {err}",
+        "log_wait_net": "Waiting for network...",
         "about_text": "{app}\nProcess combiner with Fluent styling.\nConfig: {config}\nLogs: {logs}",
         "tray_show": "Show window",
         "tray_start_enabled": "Start enabled",
@@ -483,6 +511,7 @@ STATUS_LABELS = {
     Lang.RU: {
         "running": "работает",
         "starting": "запуск",
+        "waiting": "ожидание сети",
         "stopping": "остановка",
         "stopped": "остановлен",
         "crashed": "ошибка",
@@ -490,6 +519,7 @@ STATUS_LABELS = {
     Lang.EN: {
         "running": "running",
         "starting": "starting",
+        "waiting": "waiting for network",
         "stopping": "stopping",
         "stopped": "stopped",
         "crashed": "crashed",
@@ -705,6 +735,8 @@ class Project:
         default=None, repr=False, compare=False, init=False)
     stopping: bool = field(default=False, repr=False,
                            compare=False, init=False)
+    waiting_network: bool = field(
+        default=False, repr=False, compare=False, init=False)
     external_pid: Optional[int] = field(
         default=None, repr=False, compare=False, init=False)
 
@@ -1419,7 +1451,30 @@ class HeadlessController(QtCore.QObject):
             app.aboutToQuit.connect(self._cleanup)
 
         if autostart:
-            QtCore.QTimer.singleShot(300, self.start_enabled)
+            QtCore.QTimer.singleShot(300, self._autostart_when_network_ready)
+
+    def _autostart_when_network_ready(self) -> None:
+        if is_network_ready():
+            for p in self.projects:
+                if p.waiting_network:
+                    p.waiting_network = False
+                    if p.status == "waiting":
+                        p.status = "stopped"
+            self._write_state()
+            self.start_enabled()
+            return
+        any_waiting = False
+        for p in self.projects:
+            if p.enabled:
+                p.waiting_network = True
+                p.status = "waiting"
+                any_waiting = True
+        if any_waiting:
+            log_app("Headless: waiting for network")
+        self._write_state()
+        QtCore.QTimer.singleShot(
+            NETWORK_CHECK_INTERVAL_SEC * 1000, self._autostart_when_network_ready
+        )
 
     def _write_pid(self):
         try:
@@ -1561,6 +1616,8 @@ class HeadlessController(QtCore.QObject):
         if not p.cmd:
             log_app(f"Headless: skip start {p.name} (empty cmd)")
             return
+        if p.stopping:
+            return
 
         exclude = set()
         for q in self.projects:
@@ -1586,6 +1643,7 @@ class HeadlessController(QtCore.QObject):
             )
             log_app(f"Headless: adopt {p.name} pid={p.external_pid}")
             return
+        p.waiting_network = False
         if p.clear_log_on_start:
             try:
                 path = log_path_for_project(p)
@@ -1619,9 +1677,9 @@ class HeadlessController(QtCore.QObject):
         proc.readyReadStandardError.connect(
             lambda p_=p, pr=proc: self._on_proc_output(p_, pr))
         proc.finished.connect(lambda code, status,
-                              p_=p: self._on_proc_finished(p_, code, status))
+                              p_=p, pr=proc: self._on_proc_finished(p_, pr, code, status))
         proc.errorOccurred.connect(
-            lambda err, p_=p: self._on_proc_error(p_, err))
+            lambda err, p_=p, pr=proc: self._on_proc_error(p_, pr, err))
         proc.started.connect(lambda p_=p: self._on_proc_started(p_))
 
         p.stopping = False
@@ -1647,8 +1705,11 @@ class HeadlessController(QtCore.QObject):
     def stop_project(self, p: Project, reason: str = ""):
         if reason:
             log_app(f"Headless: stop {p.name} pid={p.pid} reason={reason}")
+        p.waiting_network = False
         if p.process and p.process.state() == QtCore.QProcess.Running:
             p.stopping = True
+            p.status = "stopping"
+            self._write_state()
             pid = int(p.process.processId() or 0)
             try:
                 p.process.terminate()
@@ -1656,8 +1717,6 @@ class HeadlessController(QtCore.QObject):
                     _win_taskkill_tree(pid)
             except Exception:
                 _win_taskkill_tree(pid)
-            finally:
-                p.process = None
         else:
             if p.external_pid and is_pid_running(int(p.external_pid)):
                 try:
@@ -1666,10 +1725,9 @@ class HeadlessController(QtCore.QObject):
                     pass
             else:
                 _win_kill_project_zombies(p.cmd, p.cwd)
-
-        p.status = "stopped"
-        p.external_pid = None
-        self._write_state()
+            p.status = "stopped"
+            p.external_pid = None
+            self._write_state()
         append_project_log(p, self._format_log(self._tr("log_stop")))
 
     def _on_proc_output(self, p: Project, pr: QtCore.QProcess):
@@ -1681,10 +1739,11 @@ class HeadlessController(QtCore.QObject):
     def _on_proc_started(self, p: Project):
         p.status = "running"
         p.external_pid = None
+        p.waiting_network = False
         self._write_state()
         log_app(f"Headless: running {p.name}")
 
-    def _on_proc_finished(self, p: Project, code: int, status: QtCore.QProcess.ExitStatus):
+    def _on_proc_finished(self, p: Project, pr: QtCore.QProcess, code: int, status: QtCore.QProcess.ExitStatus):
         append_project_log(
             p,
             self._format_log(self._tr(
@@ -1694,6 +1753,8 @@ class HeadlessController(QtCore.QObject):
             )),
         )
         log_app(f"Headless: finished {p.name} code={code} status={status}")
+        if p.process is not pr:
+            return
         was_stopping = p.stopping
         p.status = "stopped" if (was_stopping or (status == QtCore.QProcess.NormalExit and code == 0)) else "crashed"
         self._write_state()
@@ -1707,7 +1768,9 @@ class HeadlessController(QtCore.QObject):
         if pr_autorestart:
             QtCore.QTimer.singleShot(2000, lambda: self.start_project(p))
 
-    def _on_proc_error(self, p: Project, err: QtCore.QProcess.ProcessError):
+    def _on_proc_error(self, p: Project, pr: QtCore.QProcess, err: QtCore.QProcess.ProcessError):
+        if p.process is not pr:
+            return
         append_project_log(p, self._format_log(
             self._tr("log_proc_error", err=err)))
         self._write_state()
@@ -2107,6 +2170,7 @@ class MainWindow(QtWidgets.QMainWindow):
         palette = {
             "running": "#16a34a" if is_light else "#22c55e",
             "starting": "#d97706" if is_light else "#f59e0b",
+            "waiting": "#d97706" if is_light else "#f59e0b",
             "stopping": "#d97706" if is_light else "#f59e0b",
             "stopped": "#dc2626" if is_light else "#f87171",
             "crashed": "#b91c1c" if is_light else "#ef4444",
@@ -2298,7 +2362,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         status = (p.status or "").strip().lower()
         can_start = status in ("stopped", "crashed")
-        can_stop = status in ("running", "starting", "stopping")
+        can_stop = status in ("running", "starting", "stopping", "waiting")
         can_restart = status in ("running", "starting", "stopped", "crashed")
 
         self.btn_start.setEnabled(can_start)
@@ -2308,9 +2372,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_del.setEnabled(status in ("stopped", "crashed") or (not self._client_mode))
 
         can_start_enabled = any((pr.status or "").strip().lower() in ("stopped", "crashed") and pr.enabled for pr in self.projects)
-        can_stop_all = any((pr.status or "").strip().lower() in ("running", "starting", "stopping") for pr in self.projects)
+        can_stop_all = any((pr.status or "").strip().lower() in ("running", "starting", "stopping", "waiting") for pr in self.projects)
         self.btn_start_enabled.setEnabled(can_start_enabled)
         self.btn_stop_all.setEnabled(can_stop_all)
+
 
     def _update_row_status(self, p: Project):
         if p.item:
@@ -2345,13 +2410,16 @@ class MainWindow(QtWidgets.QMainWindow):
             if status == "running":
                 self._pending_actions.pop(p.pid, None)
         elif action == "stop":
-            if status in ("running", "starting", "stopping"):
+            if status in ("running", "starting", "stopping", "waiting"):
                 return True
             if status in ("stopped", "crashed"):
                 self._pending_actions.pop(p.pid, None)
         elif action == "restart":
-            if status in ("stopped", "stopping"):
+            if status == "running":
                 return True
+            # увидели переход в остановку/запуск — ждём финального running
+            self._pending_actions[p.pid] = ("restart_wait", ts)
+        elif action == "restart_wait":
             if status == "running":
                 self._pending_actions.pop(p.pid, None)
         return False
@@ -2463,7 +2531,13 @@ class MainWindow(QtWidgets.QMainWindow):
         if not p:
             return
         if self._client_mode:
-            p.status = "starting"
+            if p.clear_log_on_start:
+                self._clear_log_for_project(p)
+            cur_status = (p.status or "").strip().lower()
+            if cur_status in ("running", "starting", "stopping", "waiting"):
+                p.status = "stopping"
+            else:
+                p.status = "starting"
             self._update_row_status(p)
             self._set_pending_action(p, "restart")
             self._send_command("restart", p.pid)
@@ -2609,6 +2683,7 @@ class MainWindow(QtWidgets.QMainWindow):
             _win_kill_project_zombies(p.cmd, p.cwd, exclude)
         if p.clear_log_on_start:
             self._clear_log_for_project(p)
+        p.waiting_network = False
         program, args = program_and_args_for_cmd(p.cmd)
         # Добавим пользовательские параметры запуска
         extra = (p.args or '').strip()
@@ -2633,9 +2708,9 @@ class MainWindow(QtWidgets.QMainWindow):
         proc.readyReadStandardError.connect(
             lambda p_=p, pr=proc: self._on_proc_output(p_, pr))
         proc.finished.connect(lambda code, status,
-                              p_=p: self._on_proc_finished(p_, code, status))
+                              p_=p, pr=proc: self._on_proc_finished(p_, pr, code, status))
         proc.errorOccurred.connect(
-            lambda err, p_=p: self._on_proc_error(p_, err))
+            lambda err, p_=p, pr=proc: self._on_proc_error(p_, pr, err))
         proc.started.connect(lambda p_=p: self._on_proc_started(p_))
 
         p.stopping = False
@@ -2668,6 +2743,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def stop_project(self, p: Project):
         # мягко → жёстко → зачистка зомби
+        p.waiting_network = False
         if p.process and p.process.state() == QtCore.QProcess.Running:
             p.stopping = True
             p.status = "stopping"
@@ -2679,13 +2755,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     _win_taskkill_tree(pid)
             except Exception:
                 _win_taskkill_tree(pid)
-            finally:
-                p.process = None
         else:
             _win_kill_project_zombies(p.cmd, p.cwd)
-
-        p.status = "stopped"
-        self._update_row_status(p)
+            p.status = "stopped"
+            self._update_row_status(p)
         if p.log:
             p.log.append_text(
                 f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] "
@@ -2705,7 +2778,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if text:
             append_project_log(p, text)
 
-    def _on_proc_finished(self, p: Project, code: int, status: QtCore.QProcess.ExitStatus):
+    def _on_proc_finished(self, p: Project, pr: QtCore.QProcess, code: int, status: QtCore.QProcess.ExitStatus):
         if p.log:
             p.log.append_text(
                 f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] "
@@ -2716,6 +2789,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f"[{QtCore.QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}] "
             f"{self._tr('log_finish', code=code, status=('CrashExit' if status==QtCore.QProcess.CrashExit else 'NormalExit'))}\n",
         )
+        if p.process is not pr:
+            return
         was_stopping = p.stopping
         p.status = "stopped" if (was_stopping or (status == QtCore.QProcess.NormalExit and code == 0)) else "crashed"
         self._update_row_status(p)
@@ -2729,7 +2804,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if pr_autorestart:
             QtCore.QTimer.singleShot(2000, lambda: self.start_project(p))
 
-    def _on_proc_error(self, p: Project, err: QtCore.QProcess.ProcessError):
+    def _on_proc_error(self, p: Project, pr: QtCore.QProcess, err: QtCore.QProcess.ProcessError):
+        if p.process is not pr:
+            return
         if p.log:
             p.log.append_text(self._tr("log_proc_error", err=err) + "\n")
         append_project_log(p, self._tr("log_proc_error", err=err) + "\n")
