@@ -44,7 +44,7 @@ def _strip_ansi(text: str) -> str:
 
 # ------------------------ Константы/пути -----------------------------------
 APP_NAME = "PyCombiner"
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 ORG_NAME = "PyCombiner"
 AUTOSTART_TASK_NAME = "PyCombiner Startup"
 
@@ -1272,6 +1272,7 @@ def build_task_xml(command: str, arguments: str, username: str) -> str:
     <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
     <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <DeleteExpiredTaskAfter>PT0S</DeleteExpiredTaskAfter>
     <IdleSettings>
       <StopOnIdleEnd>false</StopOnIdleEnd>
       <RestartOnIdle>false</RestartOnIdle>
@@ -1785,6 +1786,13 @@ class HeadlessController(QtCore.QObject):
             p.stopping = False
         if p.restart_pending:
             p.restart_pending = False
+            if p.clear_log_on_start:
+                try:
+                    path = log_path_for_project(p)
+                    path.write_text("", "utf-8")
+                    _clear_log_backups(path)
+                except Exception:
+                    pass
             QtCore.QTimer.singleShot(300, lambda: self.start_project(p))
             return
         if pr_autorestart:
@@ -2565,6 +2573,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._send_command("restart", p.pid)
             return
         self.stop_project(p)
+        if p.clear_log_on_start:
+            self._clear_log_for_project(p)
         self.start_project(p)
 
     def on_start_enabled(self):
